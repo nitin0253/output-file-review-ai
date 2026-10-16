@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Spyne Image Review Dashboard</title>
+    <title>Spyne Image Review Dashboard — AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -139,6 +139,20 @@
             align-items: center; justify-content: center; padding: 20px;
         }
         .modal-overlay.active { display: flex; }
+
+        .ai-progress-bar { height: 8px; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
+        .ai-progress-fill { height: 100%; background: linear-gradient(90deg,#4f46e5,#818cf8); transition: width .2s ease; }
+        .ai-fab {
+            position: fixed; bottom: 24px; right: 24px; z-index: 85;
+            display: none; align-items: center; gap: 8px;
+            background: linear-gradient(135deg,#4f46e5,#7c3aed); color: #fff;
+            padding: 12px 18px; border-radius: 999px; cursor: pointer;
+            font-weight: 700; font-size: 13px; border: none;
+            box-shadow: 0 10px 25px -5px rgba(79,70,229,.5), 0 4px 10px -4px rgba(79,70,229,.4);
+            transition: transform .15s ease;
+        }
+        .ai-fab:hover { transform: translateY(-2px); }
+        .ai-fab.visible { display: inline-flex; }
 
         .sidebar {
             transition: width 0.25s ease, min-width 0.25s ease;
@@ -1046,6 +1060,68 @@
 <div id="data-loading-overlay" class="data-loading-overlay hidden">
     <div class="spinner-blue" style="width:40px;height:40px;border-width:3px;"></div>
     <p id="data-loading-msg" class="text-slate-600 font-medium text-[14px]">Loading teams…</p>
+</div>
+
+<!-- AI few-shot classifier: floating action button + 3 modals -->
+<button id="ai-fab" class="ai-fab" onclick="aiOpenPromptModal()" title="Enough samples tagged — run AI classifier">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+    <span>Analyze with AI</span>
+</button>
+
+<div id="ai-prompt-modal" class="modal-overlay" onclick="if(event.target===this)aiClosePromptModal()">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        <div class="p-6">
+            <div class="w-14 h-14 rounded-full mx-auto mb-4 flex items-center justify-center" style="background:#eef2ff">
+                <svg class="w-8 h-8" style="color:#4f46e5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+            </div>
+            <h3 class="text-slate-800 font-bold text-[18px] text-center mb-1">Enough samples — ready to analyze</h3>
+            <p class="text-slate-500 text-[13px] text-center mb-4">At least 5 VINs tagged in each focus class. Run the classifier over the <b id="ai-prompt-pending">0</b> pending VINs, or keep reviewing by hand to tighten accuracy.</p>
+            <div id="ai-prompt-counts" class="grid grid-cols-2 gap-2 mb-5 text-[12px] bg-slate-50 rounded-lg p-3"></div>
+            <div class="flex space-x-2">
+                <button onclick="aiClosePromptModal()" class="flex-1 bg-white border border-slate-300 text-slate-700 font-semibold py-2.5 rounded-lg hover:bg-slate-50">Review more</button>
+                <button onclick="aiRunAnalysis()" class="flex-1 text-white font-semibold py-2.5 rounded-lg" style="background:#4f46e5">Analyze with AI</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="ai-progress-modal" class="modal-overlay">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md">
+        <div class="p-6">
+            <h3 class="text-slate-800 font-bold text-[18px] mb-1">Analyzing with AI</h3>
+            <p id="ai-progress-msg" class="text-slate-500 text-[13px] mb-4">Loading model…</p>
+            <div class="ai-progress-bar mb-2"><div id="ai-progress-fill" class="ai-progress-fill" style="width:0%"></div></div>
+            <div class="flex items-center justify-between text-[12px] text-slate-500">
+                <span id="ai-progress-count">0/0</span>
+                <button onclick="aiCancelAnalysis()" class="text-rose-600 hover:text-rose-700 font-semibold">Cancel</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="ai-report-modal" class="modal-overlay" onclick="if(event.target===this)aiCloseReportModal()">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col">
+        <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div>
+                <h3 class="font-bold text-slate-800 text-[17px]">AI classification report</h3>
+                <p class="text-[12px] text-slate-500 mt-0.5"><b id="ai-report-total">0</b> suggestions across Raw, Stock, Hero Angle, and Photo NA. Accept per class, review a tile to override, or dismiss and keep working manually.</p>
+            </div>
+            <button onclick="aiCloseReportModal()" class="text-slate-400 hover:text-slate-600 p-1">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="px-6 py-3 bg-slate-50 border-b border-slate-100">
+            <div id="ai-report-tiles" class="grid grid-cols-4 gap-2"></div>
+        </div>
+        <div id="ai-report-body" class="flex-1 overflow-y-auto px-6 py-4"></div>
+        <div class="px-6 py-3 border-t border-slate-100 flex justify-between items-center">
+            <button onclick="aiOpenPromptModal()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
+            <div class="flex gap-2">
+                <button onclick="aiCloseReportModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Dismiss</button>
+                <button onclick="aiAcceptAll()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg text-[13px]">Accept all</button>
+            </div>
+        </div>
+    </div>
 </div>
 
 <script>
@@ -3398,6 +3474,7 @@
         const fv   = currentImg1VINs[fIdx];
         svUpdateControls(fv ? getImg1Review(currentImg1Team.teamId, fv.vin, fv.rooftop || '') : null);
         render1ImgSidebar();
+        try { aiMaybeShowPrompt(); } catch (_) {}
     }
 
     function svToggleIssue(value) {
@@ -4934,6 +5011,328 @@
     let currentImg1VINs = [];
     let currentImg1Idx  = -1;
 
+    // ─────────────────────────────────────────────────────────────────────
+    // AI few-shot classifier (Raw / Stock / Hero Angle / Photo NA)
+    // Tag ≥5 samples per class via normal shortcuts → centroid per class
+    // via CLIP ViT-B/32 (Transformers.js, runs in-browser) → cosine-sim
+    // nearest-class suggestion for every still-pending VIN.
+    const AI_FOCUS_CLASSES = ['raw', 'stock', 'hero', 'photo_na'];
+    const AI_MIN_SAMPLES   = 5;
+    const AI_SIM_THRESHOLD = 0.72;
+    let   aiExtractor        = null;
+    let   aiExtractorPromise = null;
+    const aiEmbedCache       = new Map();
+    let   aiSuggestions      = {};
+    const aiAutoOpenedTeams  = new Set();
+    let   aiRunToken         = 0;
+
+    async function aiLoadModel(onStatus) {
+        if (aiExtractor) return aiExtractor;
+        if (aiExtractorPromise) return aiExtractorPromise;
+        onStatus && onStatus('Loading CLIP model (first time only, ~90MB)…');
+        aiExtractorPromise = (async () => {
+            const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+            mod.env.allowLocalModels = false;
+            mod.env.useBrowserCache  = true;
+            aiExtractor = {
+                processor: await mod.AutoProcessor.from_pretrained('Xenova/clip-vit-base-patch32'),
+                model:     await mod.CLIPVisionModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32'),
+                RawImage:  mod.RawImage,
+            };
+            return aiExtractor;
+        })();
+        return aiExtractorPromise;
+    }
+
+    async function aiEmbed(url) {
+        if (!url) return null;
+        if (aiEmbedCache.has(url)) return aiEmbedCache.get(url);
+        const ex = await aiLoadModel();
+        const image = await ex.RawImage.read(url);
+        const inputs = await ex.processor(image);
+        const out = await ex.model(inputs);
+        const src = out.image_embeds.data;
+        const emb = Float32Array.from(src);
+        let n = 0;
+        for (let i = 0; i < emb.length; i++) n += emb[i] * emb[i];
+        n = Math.sqrt(n) || 1;
+        for (let i = 0; i < emb.length; i++) emb[i] /= n;
+        aiEmbedCache.set(url, emb);
+        return emb;
+    }
+
+    function aiCosine(a, b) {
+        let s = 0;
+        for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+        return s;
+    }
+
+    function aiVinKey(v) { return v.rooftop ? v.vin + '|~|' + v.rooftop : v.vin; }
+
+    function aiSampleCountsByClass() {
+        const tid = currentImg1Team?.teamId;
+        const counts = {};
+        AI_FOCUS_CLASSES.forEach(c => counts[c] = 0);
+        if (!tid) return counts;
+        (currentImg1VINs || []).forEach(v => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (counts[st] !== undefined) counts[st]++;
+        });
+        return counts;
+    }
+
+    function aiAllClassesMeetThreshold() {
+        const c = aiSampleCountsByClass();
+        return AI_FOCUS_CLASSES.every(cls => c[cls] >= AI_MIN_SAMPLES);
+    }
+
+    function aiSampleUrlsByClass() {
+        const tid = currentImg1Team?.teamId;
+        const out = {};
+        AI_FOCUS_CLASSES.forEach(c => out[c] = []);
+        if (!tid) return out;
+        (currentImg1VINs || []).forEach(v => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (AI_FOCUS_CLASSES.includes(st) && v.urls && v.urls[0]) {
+                out[st].push(v.urls[0]);
+            }
+        });
+        return out;
+    }
+
+    function aiPendingVINIndices() {
+        const tid = currentImg1Team?.teamId;
+        const idx = [];
+        if (!tid) return idx;
+        (currentImg1VINs || []).forEach((v, i) => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (!st || st === 'pending') idx.push(i);
+        });
+        return idx;
+    }
+
+    function aiUpdateFab() {
+        const fab = document.getElementById('ai-fab');
+        if (!fab) return;
+        const show = !!currentImg1Team && aiAllClassesMeetThreshold();
+        fab.classList.toggle('visible', show);
+    }
+
+    function aiMaybeShowPrompt() {
+        if (!currentImg1Team) return;
+        aiUpdateFab();
+        const tid = currentImg1Team.teamId;
+        if (aiAutoOpenedTeams.has(tid)) return;
+        if (!aiAllClassesMeetThreshold()) return;
+        aiAutoOpenedTeams.add(tid);
+        aiOpenPromptModal();
+    }
+
+    function aiOpenPromptModal() {
+        if (!currentImg1Team) return;
+        const counts = aiSampleCountsByClass();
+        const pending = aiPendingVINIndices().length;
+        document.getElementById('ai-prompt-counts').innerHTML =
+            AI_FOCUS_CLASSES.map(c =>
+                '<div class="flex items-center gap-2"><span style="width:10px;height:10px;border-radius:3px;background:' + stateColor(c) + ';display:inline-block"></span><span class="text-slate-600">' + stateLabel(c) + ':</span><b class="text-slate-900">' + counts[c] + '</b></div>'
+            ).join('');
+        document.getElementById('ai-prompt-pending').textContent = pending;
+        document.getElementById('ai-prompt-modal').classList.add('active');
+    }
+
+    function aiClosePromptModal() {
+        document.getElementById('ai-prompt-modal').classList.remove('active');
+    }
+
+    async function aiRunAnalysis() {
+        aiClosePromptModal();
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const myToken = ++aiRunToken;
+        const progModal = document.getElementById('ai-progress-modal');
+        const progFill  = document.getElementById('ai-progress-fill');
+        const progMsg   = document.getElementById('ai-progress-msg');
+        const progCount = document.getElementById('ai-progress-count');
+        progModal.classList.add('active');
+        progFill.style.width = '0%';
+        progCount.textContent = '0/0';
+        progMsg.textContent = 'Loading CLIP model…';
+        try {
+            await aiLoadModel(msg => { progMsg.textContent = msg; });
+            if (myToken !== aiRunToken) return;
+
+            progMsg.textContent = 'Embedding samples…';
+            const sampleUrls = aiSampleUrlsByClass();
+            const centroids = {};
+            for (const cls of AI_FOCUS_CLASSES) {
+                const urls = sampleUrls[cls];
+                if (!urls.length) continue;
+                const vecs = [];
+                for (const u of urls) {
+                    if (myToken !== aiRunToken) return;
+                    try { const e = await aiEmbed(u); if (e) vecs.push(e); } catch (_) {}
+                }
+                if (!vecs.length) continue;
+                const dim = vecs[0].length;
+                const mean = new Float32Array(dim);
+                vecs.forEach(v => { for (let i = 0; i < dim; i++) mean[i] += v[i]; });
+                let n = 0;
+                for (let i = 0; i < dim; i++) { mean[i] /= vecs.length; n += mean[i] * mean[i]; }
+                n = Math.sqrt(n) || 1;
+                for (let i = 0; i < dim; i++) mean[i] /= n;
+                centroids[cls] = mean;
+            }
+
+            const pendingIdxs = aiPendingVINIndices();
+            aiSuggestions[tid] = aiSuggestions[tid] || {};
+            progCount.textContent = '0/' + pendingIdxs.length;
+            progMsg.textContent = 'Classifying pending VINs…';
+            let done = 0;
+            for (const idx of pendingIdxs) {
+                if (myToken !== aiRunToken) return;
+                const v = currentImg1VINs[idx];
+                const url = v.urls && v.urls[0];
+                if (url) {
+                    try {
+                        const emb = await aiEmbed(url);
+                        let bestCls = null, bestSim = -1;
+                        for (const cls of AI_FOCUS_CLASSES) {
+                            if (!centroids[cls]) continue;
+                            const s = aiCosine(emb, centroids[cls]);
+                            if (s > bestSim) { bestSim = s; bestCls = cls; }
+                        }
+                        if (bestCls && bestSim >= AI_SIM_THRESHOLD) {
+                            aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, idx };
+                        }
+                    } catch (_) {}
+                }
+                done++;
+                if (done % 3 === 0 || done === pendingIdxs.length) {
+                    progFill.style.width = (100 * done / Math.max(1, pendingIdxs.length)) + '%';
+                    progCount.textContent = done + '/' + pendingIdxs.length;
+                }
+            }
+
+            progModal.classList.remove('active');
+            try { render1ImgGallery(); } catch (_) {}
+            aiOpenReportModal();
+        } catch (err) {
+            progMsg.textContent = 'Error: ' + ((err && err.message) || err);
+            setTimeout(() => progModal.classList.remove('active'), 3000);
+        }
+    }
+
+    function aiCancelAnalysis() {
+        aiRunToken++;
+        document.getElementById('ai-progress-modal').classList.remove('active');
+    }
+
+    function aiReportBucket() {
+        const tid = currentImg1Team?.teamId;
+        const bucket = {};
+        AI_FOCUS_CLASSES.forEach(c => bucket[c] = []);
+        if (!tid) return bucket;
+        const sug = aiSuggestions[tid] || {};
+        Object.entries(sug).forEach(([vinKey, info]) => {
+            if (bucket[info.cls]) bucket[info.cls].push({ vinKey, ...info });
+        });
+        AI_FOCUS_CLASSES.forEach(c => bucket[c].sort((a, b) => b.conf - a.conf));
+        return bucket;
+    }
+
+    function aiOpenReportModal() {
+        if (!currentImg1Team) return;
+        const bucket = aiReportBucket();
+        const total  = AI_FOCUS_CLASSES.reduce((n, c) => n + bucket[c].length, 0);
+        document.getElementById('ai-report-total').textContent = total;
+        document.getElementById('ai-report-tiles').innerHTML =
+            AI_FOCUS_CLASSES.map(c => {
+                const n = bucket[c].length;
+                const dis = n ? '' : 'opacity:.4;cursor:not-allowed;';
+                return '<div class="rounded-lg p-3" style="background:' + stateColor(c) + '14;border:1px solid ' + stateColor(c) + '55">'
+                    + '<div class="text-[10px] font-bold uppercase tracking-wider" style="color:' + stateColor(c) + '">' + stateLabel(c) + '</div>'
+                    + '<div class="text-2xl font-bold text-slate-800">' + n + '</div>'
+                    + '<button class="mt-2 text-[11px] font-semibold px-2 py-1 rounded w-full" style="background:' + stateColor(c) + ';color:#fff;' + dis + '"'
+                    + (n ? '' : ' disabled') + ' onclick="aiAcceptClass(\'' + c + '\')">Accept all</button>'
+                    + '</div>';
+            }).join('');
+
+        const body = document.getElementById('ai-report-body');
+        body.innerHTML = AI_FOCUS_CLASSES.map(c => {
+            if (!bucket[c].length) return '';
+            return '<div class="mb-5">'
+                + '<div class="text-[12px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2" style="color:' + stateColor(c) + '">'
+                + '<span style="width:10px;height:10px;border-radius:3px;background:' + stateColor(c) + ';display:inline-block"></span>' + stateLabel(c)
+                + ' <span class="text-slate-400">(' + bucket[c].length + ')</span></div>'
+                + '<div class="grid grid-cols-6 md:grid-cols-8 gap-2">'
+                + bucket[c].map(item => {
+                    const v = currentImg1VINs[item.idx];
+                    const url = (v && v.urls && v.urls[0]) || '';
+                    const vinShort = (v && v.vin ? v.vin : '').slice(-8);
+                    return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + (v?.vin || '') + ' — ' + (item.conf * 100).toFixed(0) + '%" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
+                        + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
+                        + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
+                        + '</div>';
+                }).join('')
+                + '</div></div>';
+        }).join('') || '<div class="text-center text-slate-500 text-sm py-8">No suggestions above the confidence threshold. Tag a few more samples and re-run.</div>';
+
+        document.getElementById('ai-report-modal').classList.add('active');
+    }
+
+    function aiCloseReportModal() {
+        document.getElementById('ai-report-modal').classList.remove('active');
+    }
+
+    function aiAcceptClass(cls) {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const bucket = aiReportBucket()[cls] || [];
+        bucket.forEach(item => {
+            setImg1ReviewForIdx(item.idx, cls);
+            try { updateTileIssueState(item.idx, cls); } catch (_) {}
+            delete aiSuggestions[tid][item.vinKey];
+        });
+        try { updateImg1ProgressBadge(); } catch (_) {}
+        aiOpenReportModal();
+    }
+
+    function aiAcceptOne(vinKey) {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const info = (aiSuggestions[tid] || {})[vinKey];
+        if (!info) return;
+        setImg1ReviewForIdx(info.idx, info.cls);
+        try { updateTileIssueState(info.idx, info.cls); } catch (_) {}
+        delete aiSuggestions[tid][vinKey];
+        try { updateImg1ProgressBadge(); } catch (_) {}
+        aiOpenReportModal();
+    }
+
+    function aiAcceptAll() {
+        AI_FOCUS_CLASSES.forEach(c => aiAcceptClass(c));
+        aiCloseReportModal();
+        try { render1ImgGallery(); } catch (_) {}
+    }
+
+    function aiOverlaySuggestion(tile, v) {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const sug = aiSuggestions[tid];
+        if (!sug) return;
+        const info = sug[aiVinKey(v)];
+        if (!info) return;
+        const st = getImg1Review(tid, v.vin, v.rooftop || '');
+        if (st && st !== 'pending') return;
+        tile.style.outline = '2px dashed ' + stateColor(info.cls);
+        tile.style.outlineOffset = '-2px';
+        const chip = document.createElement('div');
+        chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
+        chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
+        tile.appendChild(chip);
+    }
+    // ───────────────────────── end AI classifier ─────────────────────────
+
     // ── team_id lookup (Drive CSVs that ship WITHOUT a team_id) ────────────────
     // When a rooftop's CSV has no team_id, driveCsvToRows fabricates a synthetic
     // 'drive-<slug>' id (used only as an internal storage key). On opening such a
@@ -5950,6 +6349,7 @@
                 setImg1View('single');
             });
 
+            try { aiOverlaySuggestion(tile, v); } catch (_) {}
             frag.appendChild(tile);
         });
 
@@ -5973,6 +6373,7 @@
         } else {
             if (currentImg1Idx >= 0) svPreloadAhead(currentImg1Idx, 8);
         }
+        try { aiUpdateFab(); } catch (_) {}
     }
 
     // render1ImgImagePane is kept for sidebar-click to highlight the selected VIN
