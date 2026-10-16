@@ -1111,12 +1111,13 @@
             </button>
         </div>
         <div class="px-6 py-3 bg-slate-50 border-b border-slate-100">
-            <div id="ai-report-tiles" class="grid grid-cols-4 gap-2"></div>
+            <div id="ai-report-tiles"></div>
         </div>
         <div id="ai-report-body" class="flex-1 overflow-y-auto px-6 py-4"></div>
         <div class="px-6 py-3 border-t border-slate-100 flex justify-between items-center">
             <button onclick="aiOpenPromptModal()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
             <div class="flex gap-2">
+                <button onclick="aiRunClaudeVerify()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-4 py-2 rounded-lg text-[13px] border border-indigo-200" title="Re-check Hero Angle suggestions with Claude Vision">✨ Verify Hero Angle with Claude</button>
                 <button onclick="aiCloseReportModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Dismiss</button>
                 <button onclick="aiAcceptAll()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg text-[13px]">Accept all</button>
             </div>
@@ -5019,11 +5020,15 @@
     const AI_FOCUS_CLASSES = ['raw', 'stock', 'hero', 'photo_na'];
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
+    const AI_MARGIN        = 0.03;   // top class must beat second by this much
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
     // fetch() from a browser is blocked. Route image reads through a proxy
     // that adds the header. '' disables the proxy (direct fetch). For scale
     // or privacy, deploy your own Cloudflare Worker and swap the URL below.
     const AI_IMAGE_PROXY   = 'https://corsproxy.io/?';
+    const AI_CLAUDE_MODEL  = 'claude-haiku-5-5';
+    const AI_CLAUDE_KEY_LS = 'spyne_ai_claude_key';
+    const AI_CLAUDE_HERO_PROMPT = 'You are reviewing the FIRST image a car dealer uploaded for a used-vehicle listing. "Wrong Hero Angle" means the image is NOT a proper hero shot — i.e. it shows the rear, side detail, interior, dashboard, odometer, close-up, badge, wheel, mirror, or any view other than a clear front or front-three-quarter shot of the entire car.\n\nIs this image a WRONG hero angle?\n\nRespond on exactly two lines:\nVERDICT: YES or NO\nREASON: 2-5 words';
     let   aiExtractor        = null;
     let   aiExtractorPromise = null;
     const aiEmbedCache       = new Map();
@@ -5031,6 +5036,7 @@
     const aiAutoOpenedTeams  = new Set();
     let   aiRunToken         = 0;
     let   aiLastRunStats     = null;
+    let   aiLastClaudeStats  = null;
 
     async function aiLoadModel(onStatus) {
         if (aiExtractor) return aiExtractor;
@@ -5095,12 +5101,12 @@
 
     function aiSampleUrlsByClass() {
         const tid = currentImg1Team?.teamId;
-        const out = {};
+        const out = { ok: [] };
         AI_FOCUS_CLASSES.forEach(c => out[c] = []);
         if (!tid) return out;
         (currentImg1VINs || []).forEach(v => {
             const st = getImg1Review(tid, v.vin, v.rooftop || '');
-            if (AI_FOCUS_CLASSES.includes(st) && v.urls && v.urls[0]) {
+            if ((st === 'ok' || AI_FOCUS_CLASSES.includes(st)) && v.urls && v.urls[0]) {
                 out[st].push(v.urls[0]);
             }
         });
@@ -5168,8 +5174,9 @@
             await aiLoadModel(msg => { progMsg.textContent = msg; });
             if (myToken !== aiRunToken) return;
 
-            const stats = { sampleOk:{}, sampleFail:{}, pendingOk:0, pendingFail:0, maxSim:-1, firstError:null, threshold:AI_SIM_THRESHOLD };
-            AI_FOCUS_CLASSES.forEach(c => { stats.sampleOk[c]=0; stats.sampleFail[c]=0; });
+            const classesWithSamples = ['ok', ...AI_FOCUS_CLASSES];
+            const stats = { sampleOk:{}, sampleFail:{}, pendingOk:0, pendingFail:0, pendingAsOk:0, pendingBelowMargin:0, maxSim:-1, firstError:null, threshold:AI_SIM_THRESHOLD, margin:AI_MARGIN };
+            classesWithSamples.forEach(c => { stats.sampleOk[c]=0; stats.sampleFail[c]=0; });
             const recordErr = (where, url, err) => {
                 if (!stats.firstError) stats.firstError = where + ': ' + ((err && err.message) || err);
                 console.error('[AI classifier] ' + where + ' failed for', url, err);
@@ -5178,8 +5185,8 @@
             progMsg.textContent = 'Embedding samples…';
             const sampleUrls = aiSampleUrlsByClass();
             const centroids = {};
-            for (const cls of AI_FOCUS_CLASSES) {
-                const urls = sampleUrls[cls];
+            for (const cls of classesWithSamples) {
+                const urls = sampleUrls[cls] || [];
                 if (!urls.length) continue;
                 const vecs = [];
                 for (const u of urls) {
@@ -5216,15 +5223,22 @@
                     try {
                         const emb = await aiEmbed(url);
                         stats.pendingOk++;
-                        let bestCls = null, bestSim = -1;
-                        for (const cls of AI_FOCUS_CLASSES) {
-                            if (!centroids[cls]) continue;
+                        let bestCls = null, bestSim = -1, secondSim = -1;
+                        for (const cls of Object.keys(centroids)) {
                             const s = aiCosine(emb, centroids[cls]);
-                            if (s > bestSim) { bestSim = s; bestCls = cls; }
+                            if (s > bestSim) { secondSim = bestSim; bestSim = s; bestCls = cls; }
+                            else if (s > secondSim) { secondSim = s; }
                         }
                         if (bestSim > stats.maxSim) stats.maxSim = bestSim;
-                        if (bestCls && bestSim >= AI_SIM_THRESHOLD) {
-                            aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, idx };
+                        if (bestCls === 'ok') {
+                            stats.pendingAsOk++;
+                        } else if (bestCls && AI_FOCUS_CLASSES.includes(bestCls) && bestSim >= AI_SIM_THRESHOLD) {
+                            const margin = bestSim - secondSim;
+                            if (margin >= AI_MARGIN) {
+                                aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx };
+                            } else {
+                                stats.pendingBelowMargin++;
+                            }
                         }
                     } catch (err) { stats.pendingFail++; recordErr('pending', url, err); }
                 }
@@ -5269,7 +5283,11 @@
         const bucket = aiReportBucket();
         const total  = AI_FOCUS_CLASSES.reduce((n, c) => n + bucket[c].length, 0);
         document.getElementById('ai-report-total').textContent = total;
-        document.getElementById('ai-report-tiles').innerHTML =
+        const claudeBanner = aiLastClaudeStats
+            ? '<div class="mb-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-1.5"><b>✨ Claude pass:</b> ' + aiLastClaudeStats.kept + ' kept · ' + aiLastClaudeStats.dropped + ' dropped as false-positive · ' + aiLastClaudeStats.errored + ' errored (of ' + aiLastClaudeStats.total + ')</div>'
+            : '';
+        document.getElementById('ai-report-tiles').innerHTML = claudeBanner +
+            '<div class="grid grid-cols-4 gap-2">' +
             AI_FOCUS_CLASSES.map(c => {
                 const n = bucket[c].length;
                 const dis = n ? '' : 'opacity:.4;cursor:not-allowed;';
@@ -5279,7 +5297,7 @@
                     + '<button class="mt-2 text-[11px] font-semibold px-2 py-1 rounded w-full" style="background:' + stateColor(c) + ';color:#fff;' + dis + '"'
                     + (n ? '' : ' disabled') + ' onclick="aiAcceptClass(\'' + c + '\')">Accept all</button>'
                     + '</div>';
-            }).join('');
+            }).join('') + '</div>';
 
         const body = document.getElementById('ai-report-body');
         body.innerHTML = AI_FOCUS_CLASSES.map(c => {
@@ -5293,8 +5311,12 @@
                     const v = currentImg1VINs[item.idx];
                     const url = (v && v.urls && v.urls[0]) || '';
                     const vinShort = (v && v.vin ? v.vin : '').slice(-8);
-                    return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + (v?.vin || '') + ' — ' + (item.conf * 100).toFixed(0) + '%" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
+                    const verifiedBadge = item.claudeVerified ? '<div style="position:absolute;top:3px;left:3px;background:#4f46e5;color:#fff;font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px" title="Verified by Claude: ' + (item.claudeReason || '') + '">✨</div>' : '';
+                    const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%'];
+                    if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
+                    return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + tipParts.join(' — ') + '" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
                         + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
+                        + verifiedBadge
                         + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
                         + '</div>';
                 }).join('')
@@ -5308,20 +5330,28 @@
         const s = aiLastRunStats;
         if (!s) return '';
         const row = (label, val) => '<div class="flex justify-between text-[12px] py-1 border-b border-slate-100"><span class="text-slate-500">' + label + '</span><b class="text-slate-800">' + val + '</b></div>';
-        const classCounts = AI_FOCUS_CLASSES.map(c => stateLabel(c) + ' ' + (s.sampleOk[c]||0) + '/' + ((s.sampleOk[c]||0)+(s.sampleFail[c]||0))).join(' · ');
+        const allCls = ['ok', ...AI_FOCUS_CLASSES];
+        const classCounts = allCls.map(c => {
+            const label = c === 'ok' ? 'OK' : stateLabel(c);
+            return label + ' ' + (s.sampleOk[c]||0) + '/' + ((s.sampleOk[c]||0)+(s.sampleFail[c]||0));
+        }).join(' · ');
         const diagnosis = (() => {
-            const sampleFails = AI_FOCUS_CLASSES.reduce((n,c) => n + (s.sampleFail[c]||0), 0);
-            const sampleOks   = AI_FOCUS_CLASSES.reduce((n,c) => n + (s.sampleOk[c]||0), 0);
+            const sampleFails = allCls.reduce((n,c) => n + (s.sampleFail[c]||0), 0);
+            const sampleOks   = allCls.reduce((n,c) => n + (s.sampleOk[c]||0), 0);
             if (sampleOks === 0 && sampleFails > 0) return 'Every sample image failed to embed — almost always a CORS block on the image CDN. Open DevTools → Network and check if image requests show status (blocked) or canceled.';
             if (s.pendingOk === 0 && s.pendingFail > 0) return 'Samples embedded but pending-VIN images did not — unusual. Check Console for the error.';
-            if (s.maxSim < s.threshold) return 'All images embedded fine. The best match was only ' + (s.maxSim*100).toFixed(1) + '% similar, below the ' + (s.threshold*100).toFixed(0) + '% threshold. Either lower the threshold, or add more varied samples that resemble the pending images visually.';
+            if (s.maxSim < s.threshold) return 'All images embedded fine. The best match was only ' + (s.maxSim*100).toFixed(1) + '% similar, below the ' + (s.threshold*100).toFixed(0) + '% threshold. Either lower AI_SIM_THRESHOLD in the source, or add more varied samples that resemble the pending images visually.';
+            if (s.pendingAsOk > 0 && (s.pendingAsOk / Math.max(1,s.pendingOk)) > 0.6) return 'Most pending VINs were nearest to the OK centroid, so no issue was flagged. Expected if the rooftop is mostly clean — but double-check by tagging a known-bad VIN and re-running.';
+            if (s.pendingBelowMargin > 0 && !s.centroidsBuilt?.length) return 'No centroids built. Did any samples get tagged?';
             return 'Partial embed failures. See Console for the first error.';
         })();
         return '<div class="mt-4 mx-auto max-w-md bg-slate-50 border border-slate-200 rounded-lg p-4 text-left">'
             + '<div class="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">Diagnostics</div>'
             + row('Samples embedded (ok/total)', classCounts)
-            + row('Centroids built', (s.centroidsBuilt||[]).map(c=>stateLabel(c)).join(', ') || 'none')
+            + row('Centroids built', (s.centroidsBuilt||[]).map(c=>c==='ok'?'OK':stateLabel(c)).join(', ') || 'none')
             + row('Pending embedded', s.pendingOk + ' / ' + (s.pendingOk + s.pendingFail))
+            + row('Nearest to OK (no suggestion)', s.pendingAsOk || 0)
+            + row('Rejected by margin (' + (s.margin*100).toFixed(0) + '%)', s.pendingBelowMargin || 0)
             + row('Best cosine similarity', s.maxSim >= 0 ? (s.maxSim*100).toFixed(1) + '%' : 'n/a')
             + row('Confidence threshold', (s.threshold*100).toFixed(0) + '%')
             + (s.firstError ? row('First error', '<span class="text-rose-600 text-[11px]">' + s.firstError.slice(0,120) + '</span>') : '')
@@ -5379,6 +5409,137 @@
         chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
         chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
         tile.appendChild(chip);
+    }
+    // ── Claude Vision fallback for Hero Angle ─────────────────────────────
+    function aiGetClaudeKey() {
+        try { return localStorage.getItem(AI_CLAUDE_KEY_LS) || ''; } catch (_) { return ''; }
+    }
+    function aiSetClaudeKey(k) {
+        try { localStorage.setItem(AI_CLAUDE_KEY_LS, k); } catch (_) {}
+    }
+    function aiEnsureClaudeKey() {
+        let k = aiGetClaudeKey();
+        if (!k) {
+            k = prompt('Paste your Claude API key (starts with sk-ant-).\n\nStored only in this browser\'s localStorage. Get a key at https://console.anthropic.com/settings/keys');
+            if (!k || !k.trim()) return '';
+            aiSetClaudeKey(k.trim());
+        }
+        return aiGetClaudeKey();
+    }
+
+    async function aiFetchImageBase64(url) {
+        const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
+        const r = await fetch(fetchUrl);
+        if (!r.ok) throw new Error('image fetch ' + r.status);
+        const blob = await r.blob();
+        const mt = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/jpeg';
+        const buf = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        const CHUNK = 0x8000;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return { base64: btoa(bin), media_type: mt };
+    }
+
+    async function aiClaudeHeroAngleCheck(url, apiKey) {
+        const img = await aiFetchImageBase64(url);
+        const body = {
+            model: AI_CLAUDE_MODEL,
+            max_tokens: 80,
+            messages: [{
+                role: 'user',
+                content: [
+                    { type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.base64 } },
+                    { type: 'text', text: AI_CLAUDE_HERO_PROMPT }
+                ]
+            }]
+        };
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+                'content-type': 'application/json',
+                'x-api-key': apiKey,
+                'anthropic-version': '2023-06-01',
+                'anthropic-dangerous-direct-browser-access': 'true'
+            },
+            body: JSON.stringify(body)
+        });
+        if (!resp.ok) {
+            const errTxt = await resp.text().catch(() => '');
+            throw new Error('Claude ' + resp.status + ': ' + errTxt.slice(0, 200));
+        }
+        const data = await resp.json();
+        const text = (data?.content?.[0]?.text || '').trim();
+        const vm = text.match(/VERDICT:\s*(YES|NO)/i);
+        const rm = text.match(/REASON:\s*(.+)/i);
+        return {
+            verdict: vm ? vm[1].toUpperCase() : 'UNKNOWN',
+            reason:  rm ? rm[1].trim().slice(0, 40) : '',
+        };
+    }
+
+    async function aiRunClaudeVerify() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const bucket = aiReportBucket();
+        const candidates = (bucket.hero || []).filter(x => !x.claudeVerified);
+        if (!candidates.length) {
+            alert('No unverified Hero Angle suggestions to check.\n\nIf there are none in the report, run the main AI analysis first.');
+            return;
+        }
+        const key = aiEnsureClaudeKey();
+        if (!key) return;
+        const myToken = ++aiRunToken;
+        const progModal = document.getElementById('ai-progress-modal');
+        const progFill  = document.getElementById('ai-progress-fill');
+        const progMsg   = document.getElementById('ai-progress-msg');
+        const progCount = document.getElementById('ai-progress-count');
+        aiCloseReportModal();
+        progModal.classList.add('active');
+        progFill.style.width = '0%';
+        progMsg.textContent = 'Verifying Hero Angle with Claude Vision…';
+        progCount.textContent = '0/' + candidates.length;
+        let done = 0, kept = 0, dropped = 0, errored = 0;
+        for (const item of candidates) {
+            if (myToken !== aiRunToken) return;
+            const v = currentImg1VINs[item.idx];
+            const url = v?.urls?.[0];
+            if (!url) { errored++; done++; continue; }
+            try {
+                const r = await aiClaudeHeroAngleCheck(url, key);
+                const sug = aiSuggestions[tid]?.[item.vinKey];
+                if (sug) {
+                    if (r.verdict === 'YES') {
+                        sug.claudeVerified = true;
+                        sug.claudeReason = r.reason;
+                        kept++;
+                    } else if (r.verdict === 'NO') {
+                        delete aiSuggestions[tid][item.vinKey];
+                        dropped++;
+                    } else {
+                        errored++;
+                    }
+                }
+            } catch (err) {
+                console.error('[AI classifier] Claude verify failed for', url, err);
+                errored++;
+                if (String(err.message || err).includes('401')) {
+                    aiSetClaudeKey('');
+                    alert('Claude API returned 401 Unauthorized. The key was cleared — click Verify again to re-enter it.');
+                    break;
+                }
+            }
+            done++;
+            progFill.style.width = (100 * done / candidates.length) + '%';
+            progCount.textContent = done + '/' + candidates.length;
+        }
+        aiLastClaudeStats = { kept, dropped, errored, total: candidates.length };
+        console.log('[AI classifier] Claude verify stats', aiLastClaudeStats);
+        progModal.classList.remove('active');
+        try { render1ImgGallery(); } catch (_) {}
+        aiOpenReportModal();
     }
     // ───────────────────────── end AI classifier ─────────────────────────
 
