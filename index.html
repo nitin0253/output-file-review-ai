@@ -5019,6 +5019,11 @@
     const AI_FOCUS_CLASSES = ['raw', 'stock', 'hero', 'photo_na'];
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
+    // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
+    // fetch() from a browser is blocked. Route image reads through a proxy
+    // that adds the header. '' disables the proxy (direct fetch). For scale
+    // or privacy, deploy your own Cloudflare Worker and swap the URL below.
+    const AI_IMAGE_PROXY   = 'https://corsproxy.io/?';
     let   aiExtractor        = null;
     let   aiExtractorPromise = null;
     const aiEmbedCache       = new Map();
@@ -5049,7 +5054,8 @@
         if (!url) return null;
         if (aiEmbedCache.has(url)) return aiEmbedCache.get(url);
         const ex = await aiLoadModel();
-        const image = await ex.RawImage.read(url);
+        const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
+        const image = await ex.RawImage.read(fetchUrl);
         const inputs = await ex.processor(image);
         const out = await ex.model(inputs);
         const src = out.image_embeds.data;
