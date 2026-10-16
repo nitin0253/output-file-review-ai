@@ -642,10 +642,22 @@ document.addEventListener('click', e=>{ if(!document.getElementById('dp-wrap').c
 document.getElementById('dp-dropdown').addEventListener('click', e=>e.stopPropagation());
 
 // ── BQ ──
-async function query(sql) {
+const _sleep = ms => new Promise(r=>setTimeout(r,ms));
+// Apps Script / Google occasionally returns a transient HTML page ("Sorry, unable
+// to open the file at present") instead of JSON. Parsing that threw "Unexpected
+// token '<'" and failed the whole load. Read as text and retry a few times.
+async function query(sql, _try) {
+  _try = _try || 0;
   const url=BQ+'?query='+encodeURIComponent(sql)+(AUTH_TOKEN?'&id_token='+encodeURIComponent(AUTH_TOKEN):'');
-  const res=await fetch(url,{redirect:'follow'});
-  const d=await res.json();
+  let txt;
+  try { txt = await (await fetch(url,{redirect:'follow'})).text(); }
+  catch(e){ if(_try<3){ await _sleep(500*(_try+1)); return query(sql,_try+1); } throw e; }
+  let d;
+  try { d = JSON.parse(txt); }
+  catch(e){
+    if(_try<3){ await _sleep(500*(_try+1)); return query(sql,_try+1); }
+    throw new Error('Data service returned a temporary error — please click Refresh.');
+  }
   if(!d.ok){ if(_isAuthErr(d.error)) onAuthFail(d.error); throw new Error(d.error||'Query failed'); }
   return d.rows;
 }
@@ -657,10 +669,12 @@ let _batchOk = null; // null=unknown, true=supported, false=unsupported
 async function runQueries(sqls){
   if(_batchOk===false) return Promise.all(sqls.map(query));
   let d=null;
-  try{
-    const res=await fetch(BQ,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'batch',queries:sqls,idToken:AUTH_TOKEN}),redirect:'follow'});
-    d=await res.json();
-  }catch(e){ d=null; }
+  for(let t=0;t<3 && d===null;t++){
+    try{
+      const res=await fetch(BQ,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({action:'batch',queries:sqls,idToken:AUTH_TOKEN}),redirect:'follow'});
+      d=JSON.parse(await res.text());   // text-first: a transient HTML page won't throw an unparseable error
+    }catch(e){ d=null; if(t<2) await _sleep(500*(t+1)); }
+  }
   if(d && d.ok===false && _isAuthErr(d.error)){ onAuthFail(d.error); throw new Error(d.error); }
   if(d && d.ok && Array.isArray(d.results) && d.results.length===sqls.length){
     _batchOk=true;
