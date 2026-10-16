@@ -1518,7 +1518,7 @@ document.querySelectorAll('.qs-item').forEach(i=>{ if(i.textContent.trim()==='Al
 // Boot: show the Google Sign-In gate; data loads only after an authorized sign-in.
 initAuth();
 // ── Auto-refresh with a live countdown (running timer) ──
-const SYNC_MS=300000;                 // 5 minutes
+const SYNC_MS=900000;                 // 15 minutes
 let _nextSync=Date.now()+SYNC_MS;     // reset in loadAll() after each successful (re)load
 function renderSyncTimer(){
   const el=document.getElementById('sync-timer'); if(!el) return;
