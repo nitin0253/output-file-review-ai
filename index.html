@@ -1074,8 +1074,8 @@
             <div class="w-14 h-14 rounded-full mx-auto mb-4 flex items-center justify-center" style="background:#eef2ff">
                 <svg class="w-8 h-8" style="color:#4f46e5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
             </div>
-            <h3 class="text-slate-800 font-bold text-[18px] text-center mb-1">Enough samples — ready to analyze</h3>
-            <p class="text-slate-500 text-[13px] text-center mb-4">At least 5 VINs tagged in each focus class. Run the classifier over the <b id="ai-prompt-pending">0</b> pending VINs, or keep reviewing by hand to tighten accuracy.</p>
+            <h3 class="text-slate-800 font-bold text-[18px] text-center mb-1">Analyze with AI</h3>
+            <p class="text-slate-500 text-[13px] text-center mb-4">Tag a few sample VINs per class (ideally 5+) so the classifier can learn what each issue looks like for this team. Then run it over the <b id="ai-prompt-pending">0</b> pending VINs. Classes with no samples are skipped.</p>
             <div id="ai-prompt-counts" class="grid grid-cols-2 gap-2 mb-5 text-[12px] bg-slate-50 rounded-lg p-3"></div>
             <div class="flex space-x-2">
                 <button onclick="aiClosePromptModal()" class="flex-1 bg-white border border-slate-300 text-slate-700 font-semibold py-2.5 rounded-lg hover:bg-slate-50">Review more</button>
@@ -5127,8 +5127,7 @@
     function aiUpdateFab() {
         const fab = document.getElementById('ai-fab');
         if (!fab) return;
-        const show = !!currentImg1Team && aiAllClassesMeetThreshold();
-        fab.classList.toggle('visible', show);
+        fab.classList.toggle('visible', !!currentImg1Team);
     }
 
     function aiMaybeShowPrompt() {
