@@ -5694,18 +5694,28 @@
     function aiOverlaySuggestion(tile, v) {
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
-        const sug = aiSuggestions[tid];
-        if (!sug) return;
-        const info = sug[aiVinKey(v)];
-        if (!info) return;
         const st = getImg1Review(tid, v.vin, v.rooftop || '');
-        if (st && st !== 'pending') return;
-        tile.style.outline = '2px dashed ' + stateColor(info.cls);
-        tile.style.outlineOffset = '-2px';
-        const chip = document.createElement('div');
-        chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
-        chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
-        tile.appendChild(chip);
+        if (st && st !== 'pending') return;   // already reviewed; no overlay
+        const sug  = aiSuggestions[tid] || {};
+        const info = sug[aiVinKey(v)];
+        if (info) {
+            tile.style.outline = '2px dashed ' + stateColor(info.cls);
+            tile.style.outlineOffset = '-2px';
+            const chip = document.createElement('div');
+            chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
+            chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
+            tile.appendChild(chip);
+        } else if (aiLastRunStats) {
+            // AI ran but didn't produce a suggestion for this VIN → uncategorized.
+            // Amber dashed border + "?" chip so it stands out against reviewed tiles.
+            tile.style.outline = '2px dashed #f59e0b';
+            tile.style.outlineOffset = '-2px';
+            const chip = document.createElement('div');
+            chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:#f59e0b;z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
+            chip.textContent = '?';
+            chip.title = 'AI could not classify — manual review';
+            tile.appendChild(chip);
+        }
     }
     // ── Claude Vision fallback for Hero Angle ─────────────────────────────
     function aiGetClaudeKey() {
