@@ -5067,6 +5067,7 @@
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
     const AI_MARGIN        = 0.03;   // top class must beat second by this much
+    const AI_FETCH_CONCURRENCY = 6;  // parallel image fetches (CLIP embed stays serial)
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
     // fetch() from a browser is blocked. Route image reads through a proxy
     // that adds the header. '' disables the proxy (direct fetch). For scale
@@ -5102,22 +5103,74 @@
         return aiExtractorPromise;
     }
 
-    async function aiEmbed(url) {
-        if (!url) return null;
-        if (aiEmbedCache.has(url)) return aiEmbedCache.get(url);
-        const ex = await aiLoadModel();
+    async function aiFetchRaw(url, ex) {
         const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
-        const image = await ex.RawImage.read(fetchUrl);
-        const inputs = await ex.processor(image);
-        const out = await ex.model(inputs);
-        const src = out.image_embeds.data;
+        return await ex.RawImage.read(fetchUrl);
+    }
+
+    function aiNormalizeEmbed(src) {
         const emb = Float32Array.from(src);
         let n = 0;
         for (let i = 0; i < emb.length; i++) n += emb[i] * emb[i];
         n = Math.sqrt(n) || 1;
         for (let i = 0; i < emb.length; i++) emb[i] /= n;
+        return emb;
+    }
+
+    async function aiEmbedFromRaw(rawImg, ex) {
+        const inputs = await ex.processor(rawImg);
+        const out = await ex.model(inputs);
+        return aiNormalizeEmbed(out.image_embeds.data);
+    }
+
+    async function aiEmbed(url) {
+        if (!url) return null;
+        if (aiEmbedCache.has(url)) return aiEmbedCache.get(url);
+        const ex = await aiLoadModel();
+        const image = await aiFetchRaw(url, ex);
+        const emb = await aiEmbedFromRaw(image, ex);
         aiEmbedCache.set(url, emb);
         return emb;
+    }
+
+    // Pipeline: fetch N images in parallel, embed+process one at a time, call
+    // onItem({idx, url, emb, err}) in input order as each completes. CLIP's
+    // WASM backend is single-threaded so embeds have to serialize; fetches
+    // (which dominate wall-clock through the CORS proxy) overlap freely.
+    async function aiPipelineEmbed(urls, concurrency, onItem, isCancelled) {
+        const ex = await aiLoadModel();
+        const inflight = new Map();   // idx -> Promise<RawImage|null>
+        let fetchHead = 0;
+        const queueOne = () => {
+            while (fetchHead < urls.length && inflight.size < concurrency) {
+                const i = fetchHead++;
+                const url = urls[i];
+                if (!url) { inflight.set(i, Promise.resolve(null)); continue; }
+                if (aiEmbedCache.has(url)) { inflight.set(i, Promise.resolve('__cached__')); continue; }
+                inflight.set(i, aiFetchRaw(url, ex).catch(err => ({__err: err})));
+            }
+        };
+        queueOne();
+        for (let i = 0; i < urls.length; i++) {
+            if (isCancelled && isCancelled()) return;
+            const slot = inflight.get(i);
+            inflight.delete(i);
+            queueOne();
+            const url = urls[i];
+            let emb = null, err = null;
+            try {
+                const raw = await slot;
+                if (raw === '__cached__') {
+                    emb = aiEmbedCache.get(url);
+                } else if (raw && !raw.__err) {
+                    emb = await aiEmbedFromRaw(raw, ex);
+                    aiEmbedCache.set(url, emb);
+                } else {
+                    err = (raw && raw.__err) || new Error('fetch returned no image');
+                }
+            } catch (e) { err = e; }
+            onItem({ idx: i, url, emb, err });
+        }
     }
 
     function aiCosine(a, b) {
@@ -5263,15 +5316,20 @@
             stats.pendingCount = pendingIdxs.length;
             aiSuggestions[tid] = aiSuggestions[tid] || {};
             progCount.textContent = '0/' + pendingIdxs.length;
-            progMsg.textContent = 'Classifying pending VINs…';
+            progMsg.textContent = 'Classifying pending VINs (' + AI_FETCH_CONCURRENCY + ' parallel fetches)…';
+            const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
             let done = 0;
-            for (const idx of pendingIdxs) {
-                if (myToken !== aiRunToken) return;
-                const v = currentImg1VINs[idx];
-                const url = v.urls && v.urls[0];
-                if (url) {
-                    try {
-                        const emb = await aiEmbed(url);
+            await aiPipelineEmbed(
+                pendingUrls,
+                AI_FETCH_CONCURRENCY,
+                ({ idx: localIdx, url, emb, err }) => {
+                    if (myToken !== aiRunToken) return;
+                    const vinIdx = pendingIdxs[localIdx];
+                    const v = currentImg1VINs[vinIdx];
+                    if (err) {
+                        stats.pendingFail++;
+                        recordErr('pending', url, err);
+                    } else if (emb) {
                         stats.pendingOk++;
                         let bestCls = null, bestSim = -1, secondSim = -1;
                         for (const cls of Object.keys(centroids)) {
@@ -5283,20 +5341,22 @@
                         if (bestCls && (bestCls === 'ok' || AI_FOCUS_CLASSES.includes(bestCls))) {
                             const margin = bestSim - secondSim;
                             if (bestSim >= AI_SIM_THRESHOLD && margin >= AI_MARGIN) {
-                                aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx };
+                                aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx: vinIdx };
                                 if (bestCls === 'ok') stats.pendingAsOk++;
                             } else {
                                 stats.pendingBelowMargin++;
                             }
                         }
-                    } catch (err) { stats.pendingFail++; recordErr('pending', url, err); }
-                }
-                done++;
-                if (done % 3 === 0 || done === pendingIdxs.length) {
-                    progFill.style.width = (100 * done / Math.max(1, pendingIdxs.length)) + '%';
-                    progCount.textContent = done + '/' + pendingIdxs.length;
-                }
-            }
+                    }
+                    done++;
+                    if (done % 3 === 0 || done === pendingIdxs.length) {
+                        progFill.style.width = (100 * done / Math.max(1, pendingIdxs.length)) + '%';
+                        progCount.textContent = done + '/' + pendingIdxs.length;
+                    }
+                },
+                () => myToken !== aiRunToken
+            );
+            if (myToken !== aiRunToken) return;
 
             aiLastRunStats = stats;
             console.log('[AI classifier] run stats', stats);
