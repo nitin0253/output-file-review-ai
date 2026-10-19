@@ -2704,6 +2704,9 @@
         driveLevels = driveLevels.slice(0, i + 1);
         driveLevels[i].selectedId = childId || null;
         driveSelectedCsvIds.clear();
+        // Immediate re-render so stale deeper sub-folder dropdowns disappear
+        // the moment the parent changes, rather than lingering through the fetch.
+        renderDriveNavigator();
         if (childId) {
             const child = (driveLevels[i].folders || []).find(f => f.id === childId);
             // Loader goes in the CSV (right) panel; left column keeps its dropdowns
