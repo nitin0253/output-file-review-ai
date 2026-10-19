@@ -5111,13 +5111,13 @@
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
     const AI_MARGIN        = 0.03;   // top class must beat second by this much
-    const AI_FETCH_CONCURRENCY = 5;  // parallel image fetches (CLIP embed stays serial)
+    const AI_FETCH_CONCURRENCY = 15; // parallel image fetches (CLIP embed stays serial)
     const AI_FETCH_RETRIES     = 2;  // retries on image fetch error (incl. proxy 5xx)
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
     // fetch() from a browser is blocked. Route image reads through a proxy
     // that adds the header. '' disables the proxy (direct fetch). For scale
     // or privacy, deploy your own Cloudflare Worker and swap the URL below.
-    const AI_IMAGE_PROXY   = 'https://api.codetabs.com/v1/proxy?quest=';
+    const AI_IMAGE_PROXY   = 'https://spyne-img-proxy.nitin-kumar.workers.dev/?url=';
     const AI_CLAUDE_MODEL  = 'claude-haiku-5-5';
     const AI_CLAUDE_KEY_LS = 'spyne_ai_claude_key';
     const AI_CLAUDE_HERO_PROMPT = 'You are reviewing the FIRST image a car dealer uploaded for a used-vehicle listing. "Wrong Hero Angle" means the image is NOT a proper hero shot — i.e. it shows the rear, side detail, interior, dashboard, odometer, close-up, badge, wheel, mirror, or any view other than a clear front or front-three-quarter shot of the entire car.\n\nIs this image a WRONG hero angle?\n\nRespond on exactly two lines:\nVERDICT: YES or NO\nREASON: 2-5 words';
