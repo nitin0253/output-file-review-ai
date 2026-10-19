@@ -5088,16 +5088,44 @@
     async function aiLoadModel(onStatus) {
         if (aiExtractor) return aiExtractor;
         if (aiExtractorPromise) return aiExtractorPromise;
-        onStatus && onStatus('Loading CLIP model (first time only, ~90MB)…');
         aiExtractorPromise = (async () => {
-            const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2');
+            const mod = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.2');
             mod.env.allowLocalModels = false;
             mod.env.useBrowserCache  = true;
-            aiExtractor = {
-                processor: await mod.AutoProcessor.from_pretrained('Xenova/clip-vit-base-patch32'),
-                model:     await mod.CLIPVisionModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32'),
-                RawImage:  mod.RawImage,
-            };
+
+            // Prefer WebGPU for 3-5x faster CLIP forward pass; probe adapter
+            // availability (Chrome/Edge on desktop; Safari TP + flag) and only
+            // then try to load fp32 weights on GPU. Any load failure falls back
+            // to CPU WASM with int8-quantized weights (the previous default).
+            let preferDevice = null;
+            if (typeof navigator !== 'undefined' && 'gpu' in navigator) {
+                try {
+                    const adapter = await navigator.gpu.requestAdapter();
+                    if (adapter) preferDevice = 'webgpu';
+                } catch (_) {}
+            }
+
+            const loadProcessor = () => mod.AutoProcessor.from_pretrained('Xenova/clip-vit-base-patch32');
+            const loadModel = (opts) => mod.CLIPVisionModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32', opts);
+
+            if (preferDevice === 'webgpu') {
+                try {
+                    onStatus && onStatus('Loading CLIP model on WebGPU (fast, ~85MB first time)…');
+                    const [processor, model] = await Promise.all([loadProcessor(), loadModel({ device: 'webgpu', dtype: 'fp32' })]);
+                    aiExtractor = { processor, model, RawImage: mod.RawImage, device: 'webgpu' };
+                    console.log('[AI classifier] model loaded on WebGPU');
+                    return aiExtractor;
+                } catch (err) {
+                    console.warn('[AI classifier] WebGPU load failed, falling back to CPU WASM:', err);
+                    onStatus && onStatus('WebGPU unavailable; loading on CPU WASM (~90MB first time)…');
+                }
+            } else {
+                onStatus && onStatus('Loading CLIP model on CPU WASM (~90MB first time)…');
+            }
+
+            const [processor, model] = await Promise.all([loadProcessor(), loadModel({})]);
+            aiExtractor = { processor, model, RawImage: mod.RawImage, device: 'wasm' };
+            console.log('[AI classifier] model loaded on CPU WASM');
             return aiExtractor;
         })();
         return aiExtractorPromise;
@@ -5338,7 +5366,7 @@
             stats.pendingCount = pendingIdxs.length;
             aiSuggestions[tid] = aiSuggestions[tid] || {};
             progCount.textContent = '0/' + pendingIdxs.length;
-            progMsg.textContent = 'Classifying pending VINs (' + AI_FETCH_CONCURRENCY + ' parallel fetches)…';
+            progMsg.textContent = 'Classifying pending VINs on ' + (aiExtractor?.device === 'webgpu' ? 'WebGPU' : 'CPU') + ' (' + AI_FETCH_CONCURRENCY + ' parallel fetches)…';
             const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
             let done = 0;
             await aiPipelineEmbed(
