@@ -5067,7 +5067,7 @@
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
     const AI_MARGIN        = 0.03;   // top class must beat second by this much
-    const AI_FETCH_CONCURRENCY = 6;  // parallel image fetches (CLIP embed stays serial)
+    const AI_FETCH_CONCURRENCY = 10; // parallel image fetches (CLIP embed stays serial)
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
     // fetch() from a browser is blocked. Route image reads through a proxy
     // that adds the header. '' disables the proxy (direct fetch). For scale
@@ -5285,21 +5285,42 @@
                 console.error('[AI classifier] ' + where + ' failed for', url, err);
             };
 
-            progMsg.textContent = 'Embedding samples…';
+            // Flatten samples with their class tag, embed through the same pipeline
+            // so the samples parallelize at the fetch level too.
             const sampleUrls = aiSampleUrlsByClass();
+            const sampleFlat = [];
+            classesWithSamples.forEach(cls => (sampleUrls[cls] || []).forEach(u => sampleFlat.push({ cls, url: u })));
+            const vecsByClass = {};
+            classesWithSamples.forEach(c => vecsByClass[c] = []);
+            progMsg.textContent = 'Embedding ' + sampleFlat.length + ' sample images…';
+            progCount.textContent = '0/' + sampleFlat.length;
+            let sampleDone = 0;
+            await aiPipelineEmbed(
+                sampleFlat.map(x => x.url),
+                AI_FETCH_CONCURRENCY,
+                ({ idx, url, emb, err }) => {
+                    if (myToken !== aiRunToken) return;
+                    const cls = sampleFlat[idx].cls;
+                    if (err) {
+                        stats.sampleFail[cls]++;
+                        recordErr('sample ' + cls, url, err);
+                    } else if (emb) {
+                        vecsByClass[cls].push(emb);
+                        stats.sampleOk[cls]++;
+                    }
+                    sampleDone++;
+                    if (sampleDone % 3 === 0 || sampleDone === sampleFlat.length) {
+                        progFill.style.width = (100 * sampleDone / Math.max(1, sampleFlat.length)) + '%';
+                        progCount.textContent = sampleDone + '/' + sampleFlat.length;
+                    }
+                },
+                () => myToken !== aiRunToken
+            );
+            if (myToken !== aiRunToken) return;
+
             const centroids = {};
             for (const cls of classesWithSamples) {
-                const urls = sampleUrls[cls] || [];
-                if (!urls.length) continue;
-                const vecs = [];
-                for (const u of urls) {
-                    if (myToken !== aiRunToken) return;
-                    try {
-                        const e = await aiEmbed(u);
-                        if (e) { vecs.push(e); stats.sampleOk[cls]++; }
-                        else   { stats.sampleFail[cls]++; }
-                    } catch (err) { stats.sampleFail[cls]++; recordErr('sample '+cls, u, err); }
-                }
+                const vecs = vecsByClass[cls];
                 if (!vecs.length) continue;
                 const dim = vecs[0].length;
                 const mean = new Float32Array(dim);
@@ -5311,6 +5332,7 @@
                 centroids[cls] = mean;
             }
             stats.centroidsBuilt = Object.keys(centroids);
+            progFill.style.width = '0%';
 
             const pendingIdxs = aiPendingVINIndices();
             stats.pendingCount = pendingIdxs.length;
