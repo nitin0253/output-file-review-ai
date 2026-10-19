@@ -5112,6 +5112,10 @@
     const AI_MIN_SAMPLES   = 5;
     const AI_SIM_THRESHOLD = 0.72;
     const AI_MARGIN        = 0.03;   // top class must beat second by this much
+    // Per-class threshold overrides. Stock (CGI render) false-positives on dark
+    // reflective dealer photos are the most common accuracy miss, so it gets a
+    // stricter 80% bar — borderline cases fall into Uncategorized for human review.
+    const AI_CLASS_THRESHOLD = { stock: 0.80 };
     const AI_FETCH_CONCURRENCY = 15; // parallel image fetches (CLIP embed stays serial)
     const AI_FETCH_RETRIES     = 2;  // retries on image fetch error (incl. proxy 5xx)
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
@@ -5478,8 +5482,9 @@
                             const margin = bestSim - secondSim;
                             const k = sampleSizeByClass[bestCls] || 0;
                             // k>=3 uses base margin; k=1 adds 0.06, k=2 adds 0.03.
-                            const requiredMargin = k >= 3 ? AI_MARGIN : AI_MARGIN + 0.03 * (3 - k);
-                            if (bestSim >= AI_SIM_THRESHOLD && margin >= requiredMargin) {
+                            const requiredMargin    = k >= 3 ? AI_MARGIN : AI_MARGIN + 0.03 * (3 - k);
+                            const classThreshold    = AI_CLASS_THRESHOLD[bestCls] || AI_SIM_THRESHOLD;
+                            if (bestSim >= classThreshold && margin >= requiredMargin) {
                                 aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx: vinIdx };
                                 if (bestCls === 'ok') stats.pendingAsOk++;
                             } else {
