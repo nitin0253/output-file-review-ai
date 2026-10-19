@@ -2527,6 +2527,15 @@
              + '<span class="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Browse folders</span>'
              + '<button type="button" class="text-[11px] text-blue-600 hover:underline" onclick="driveRefresh()">↻ Refresh list</button></div>';
         driveLevels.forEach((lvl, i) => {
+            if (lvl.__loading) {
+                // Placeholder row shown while the parent's children are being fetched.
+                left += '<div class="mb-2">'
+                     + '<label class="block text-[10px] text-slate-400 mb-0.5 px-1">Sub-folder — loading…</label>'
+                     + '<div class="w-full p-2 border border-slate-200 rounded-lg text-[13px] bg-slate-50 text-slate-400 flex items-center gap-2">'
+                     + '<div class="spinner-blue" style="width:12px;height:12px;border-width:2px"></div>'
+                     + '<span>Loading sub-folders…</span></div></div>';
+                return;
+            }
             if (!lvl.folders || !lvl.folders.length) return;
             const kind = i === 0 ? 'folder' : 'sub-folder';
             let opts = '<option value="">— select ' + kind + ' —</option>';
@@ -2704,13 +2713,16 @@
         driveLevels = driveLevels.slice(0, i + 1);
         driveLevels[i].selectedId = childId || null;
         driveSelectedCsvIds.clear();
-        // Immediate re-render so stale deeper sub-folder dropdowns disappear
-        // the moment the parent changes, rather than lingering through the fetch.
+        const child = childId ? (driveLevels[i].folders || []).find(f => f.id === childId) : null;
+        // Push a loading-placeholder level IMMEDIATELY so the sub-folder slot
+        // appears right away with "Loading sub-folders…", instead of blanking
+        // out until the fetch returns. The placeholder is replaced in-place
+        // once listDriveChildren resolves.
+        if (childId) {
+            driveLevels.push({ id: '__loading__', name: 'Loading…', folders: null, csvs: [], selectedId: null, __loading: true });
+        }
         renderDriveNavigator();
         if (childId) {
-            const child = (driveLevels[i].folders || []).find(f => f.id === childId);
-            // Loader goes in the CSV (right) panel; left column keeps its dropdowns
-            // showing the current selection for continuity.
             const csvEl = document.getElementById('drive-csv-panel');
             if (csvEl) csvEl.innerHTML = driveLoaderHtml('Opening ' + (child ? child.name : 'folder') + '…');
             const status = document.getElementById('drive-load-status');
@@ -2720,8 +2732,10 @@
             }
             try {
                 const { folders, csvs } = await listDriveChildren(childId);
-                driveLevels.push({ id: childId, name: child ? child.name : 'Folder', folders, csvs, selectedId: null });
+                // Replace the loading placeholder with the real level in-place
+                driveLevels[driveLevels.length - 1] = { id: childId, name: child ? child.name : 'Folder', folders, csvs, selectedId: null };
             } catch (err) {
+                driveLevels.pop();  // drop the placeholder on error
                 showError('Could not open folder: ' + err.message);
             }
             if (status) status.classList.add('hidden');
