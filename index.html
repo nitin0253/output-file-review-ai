@@ -2689,12 +2689,18 @@
         driveLevels[i].selectedId = childId || null;
         driveSelectedCsvIds.clear();
         if (childId) {
-            const child  = (driveLevels[i].folders || []).find(f => f.id === childId);
+            const child = (driveLevels[i].folders || []).find(f => f.id === childId);
+            // Visible spinner inside the browser panel while the next level loads.
+            // (We also keep #drive-load-status in sync for anything else that reads it.)
+            const el = document.getElementById('drive-browser');
+            if (el) {
+                el.innerHTML = '<div class="py-8 flex flex-col items-center justify-center gap-3 text-slate-500">'
+                    + '<div class="spinner-blue" style="width:22px;height:22px;border-width:3px"></div>'
+                    + '<div class="text-[12px]">Opening ' + escapeHtml(child ? child.name : 'folder') + '…</div></div>';
+            }
             const status = document.getElementById('drive-load-status');
             if (status) {
-                status.innerHTML = '<span class="inline-flex items-center gap-1.5">'
-                    + '<span class="spinner-blue" style="display:inline-block;width:10px;height:10px;border-width:2px;vertical-align:middle"></span>'
-                    + '<span>Opening ' + escapeHtml(child ? child.name : 'folder') + '…</span></span>';
+                status.innerHTML = 'Opening ' + escapeHtml(child ? child.name : 'folder') + '…';
                 status.classList.remove('hidden');
             }
             try {
