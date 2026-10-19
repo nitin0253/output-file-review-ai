@@ -2507,6 +2507,25 @@
         } catch (e) { /* non-fatal */ }
     }
 
+    // Download a single CSV from Drive directly to disk (uses the cached fetch so
+    // repeated downloads don't re-hit the Drive proxy).
+    async function driveDownloadCsv(fileId, fileName) {
+        try {
+            const text = await fetchDriveCsvTextCached(fileId);
+            const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+            const url  = URL.createObjectURL(blob);
+            const a    = document.createElement('a');
+            a.href     = url;
+            a.download = fileName || (fileId + '.csv');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
+        } catch (err) {
+            showError('CSV download failed: ' + (err && err.message || err));
+        }
+    }
+
     // Shared loader HTML for the Drive browser panels (both column states).
     function driveLoaderHtml(msg) {
         return '<div class="h-full flex flex-col items-center justify-center gap-3 text-slate-500 py-16">'
@@ -2577,7 +2596,13 @@
                  + '<div class="text-[10px] uppercase tracking-wider text-slate-400 font-bold">Available CSVs in ' + escapeHtml(curName) + ' (' + csvs.length + ')</div>'
                  + '<label class="text-[11px] text-slate-500 flex items-center gap-1 cursor-pointer">'
                  + '<input type="checkbox" id="drive-select-all" onchange="driveToggleAll(this.checked)"> Select all</label></div>';
+            const dlIcon = '<svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>';
             shown.forEach(f => {
+                const safeId   = (f.id   || '').replace(/'/g, "\\'");
+                const safeName = (f.name || '').replace(/'/g, "\\'");
+                const dlBtn    = '<button type="button" class="text-slate-400 hover:text-blue-600 flex-shrink-0 p-1" title="Download CSV" '
+                               + 'onclick="event.preventDefault();event.stopPropagation();driveDownloadCsv(\'' + safeId + '\',\'' + safeName + '\')">'
+                               + dlIcon + '</button>';
                 const c = drivePickState.claims[f.id];
                 const takenByOther = c && (c.reviewer || '').toLowerCase() !== meLower;
                 if (takenByOther) {
@@ -2585,12 +2610,14 @@
                     right += '<div class="w-full flex items-center gap-2 px-2 py-1.5 rounded text-[13px] cursor-not-allowed bg-slate-50" title="Picked by ' + who + '">'
                          + '<span class="w-3 flex-shrink-0"></span>'
                          + '<span>🔒</span><span class="truncate flex-1 text-slate-400 line-through">' + escapeHtml(f.name || '') + '</span>'
-                         + '<span class="text-[10px] text-amber-600 whitespace-nowrap font-semibold flex-shrink-0">picked by ' + who + '</span></div>';
+                         + '<span class="text-[10px] text-amber-600 whitespace-nowrap font-semibold flex-shrink-0">picked by ' + who + '</span>'
+                         + dlBtn + '</div>';
                 } else {
                     const checked = driveSelectedCsvIds.has(f.id) ? 'checked' : '';
                     right += '<label class="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-50 cursor-pointer text-[13px]">'
                          + '<input type="checkbox" ' + checked + ' onchange="driveToggleCsv(\'' + f.id + '\', this.checked)">'
-                         + '<span>📄</span><span class="truncate flex-1">' + escapeHtml(f.name || '') + '</span></label>';
+                         + '<span>📄</span><span class="truncate flex-1">' + escapeHtml(f.name || '') + '</span>'
+                         + dlBtn + '</label>';
                 }
             });
             right += '<div id="drive-csv-totals" class="text-[11px] text-slate-500 px-2 pt-2"></div>';
