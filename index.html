@@ -1434,6 +1434,7 @@
         if (pageId === 'page-dashboard' && teamsList.length) renderDashboard();
         // Keep the "clear selected teams" bar tied to the dashboard only
         try { updateDashClearBar(); } catch (e) {}
+        try { aiUpdateFab(); } catch (_) {}
     }
 
     function goHome() {
@@ -5129,6 +5130,7 @@
     let   aiRunToken         = 0;
     let   aiLastRunStats     = null;
     let   aiLastClaudeStats  = null;
+    const img1BrokenImgIndices = new Set();  // VIN indices whose first-image tile could not display
 
     async function aiLoadModel(onStatus) {
         if (aiExtractor) return aiExtractor;
@@ -5316,7 +5318,9 @@
     function aiUpdateFab() {
         const fab = document.getElementById('ai-fab');
         if (!fab) return;
-        fab.classList.toggle('visible', !!currentImg1Team);
+        const reviewActive = document.getElementById('page-review')?.classList.contains('active');
+        const inImg1Mode   = typeof reviewMode !== 'undefined' && reviewMode === '1img';
+        fab.classList.toggle('visible', !!currentImg1Team && !!reviewActive && !!inImg1Mode);
     }
 
     function aiMaybeShowPrompt() {
@@ -5417,11 +5421,32 @@
                 centroids[cls] = mean;
             }
             stats.centroidsBuilt = Object.keys(centroids);
+            // Per-class sample counts drive an adaptive margin: classes with 1-2
+            // samples have noisy centroids, so require a bigger margin to suggest.
+            const sampleSizeByClass = {};
+            classesWithSamples.forEach(c => sampleSizeByClass[c] = (vecsByClass[c] || []).length);
             progFill.style.width = '0%';
 
-            const pendingIdxs = aiPendingVINIndices();
-            stats.pendingCount = pendingIdxs.length;
+            const allPendingIdxs = aiPendingVINIndices();
+            stats.pendingCount = allPendingIdxs.length;
             aiSuggestions[tid] = aiSuggestions[tid] || {};
+
+            // Fast-path: VINs whose first-image tile could not display (empty URL
+            // or all fallbacks errored) are tagged Photo NA directly, bypassing
+            // CLIP. These are the "No image" tiles the reviewer treats as Photo NA.
+            stats.pendingAutoPhotoNA = 0;
+            const pendingIdxs = [];
+            allPendingIdxs.forEach(i => {
+                const v = currentImg1VINs[i];
+                const firstUrl = v && v.urls && v.urls[0];
+                if (!firstUrl || img1BrokenImgIndices.has(i)) {
+                    aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: i, autoBrokenImg: true };
+                    stats.pendingAutoPhotoNA++;
+                } else {
+                    pendingIdxs.push(i);
+                }
+            });
+
             progCount.textContent = '0/' + pendingIdxs.length;
             progMsg.textContent = 'Classifying pending VINs on ' + (aiExtractor?.device === 'webgpu' ? 'WebGPU' : 'CPU') + ' (' + AI_FETCH_CONCURRENCY + ' parallel fetches)…';
             const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
@@ -5434,6 +5459,9 @@
                     const vinIdx = pendingIdxs[localIdx];
                     const v = currentImg1VINs[vinIdx];
                     if (err) {
+                        // Fetch failed after retries → treat as "no displayable image"
+                        aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: vinIdx, autoBrokenImg: true };
+                        stats.pendingAutoPhotoNA++;
                         stats.pendingFail++;
                         recordErr('pending', url, err);
                     } else if (emb) {
@@ -5447,7 +5475,10 @@
                         if (bestSim > stats.maxSim) stats.maxSim = bestSim;
                         if (bestCls && (bestCls === 'ok' || AI_FOCUS_CLASSES.includes(bestCls))) {
                             const margin = bestSim - secondSim;
-                            if (bestSim >= AI_SIM_THRESHOLD && margin >= AI_MARGIN) {
+                            const k = sampleSizeByClass[bestCls] || 0;
+                            // k>=3 uses base margin; k=1 adds 0.06, k=2 adds 0.03.
+                            const requiredMargin = k >= 3 ? AI_MARGIN : AI_MARGIN + 0.03 * (3 - k);
+                            if (bestSim >= AI_SIM_THRESHOLD && margin >= requiredMargin) {
                                 aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx: vinIdx };
                                 if (bestCls === 'ok') stats.pendingAsOk++;
                             } else {
@@ -5567,8 +5598,9 @@
             + row('Samples embedded (ok/total)', classCounts)
             + row('Centroids built', (s.centroidsBuilt||[]).map(c=>c==='ok'?'OK':stateLabel(c)).join(', ') || 'none')
             + row('Pending embedded', s.pendingOk + ' / ' + (s.pendingOk + s.pendingFail))
+            + row('Auto-tagged Photo NA (no image)', s.pendingAutoPhotoNA || 0)
             + row('Nearest to OK (no suggestion)', s.pendingAsOk || 0)
-            + row('Rejected by margin (' + (s.margin*100).toFixed(0) + '%)', s.pendingBelowMargin || 0)
+            + row('Rejected by margin (adaptive)', s.pendingBelowMargin || 0)
             + row('Best cosine similarity', s.maxSim >= 0 ? (s.maxSim*100).toFixed(1) + '%' : 'n/a')
             + row('Confidence threshold', (s.threshold*100).toFixed(0) + '%')
             + (s.firstError ? row('First error', '<span class="text-rose-600 text-[11px]">' + s.firstError.slice(0,120) + '</span>') : '')
@@ -6324,6 +6356,7 @@
         if (vtG) { vtG.classList.add('active'); vtS.classList.remove('active'); }
         currentImg1Team = team;
         currentImg1Idx  = -1;
+        img1BrokenImgIndices.clear();  // fresh team = fresh broken-image tracking
         const teamVins  = vinsByTeam.get(team.teamId);
         currentImg1VINs = teamVins ? [...teamVins.entries()].map(([key, entry]) => {
             // key may be 'vin' (single-rooftop) or 'vin|~|rooftop' (multi-rooftop map)
@@ -6423,6 +6456,7 @@
 
     function restore1ImgMode() {
         reviewMode = 'vin';
+        try { aiUpdateFab(); } catch (_) {}
         startReviewTimer();
         const vrCtrls = document.getElementById('vin-view-controls');
         if (vrCtrls) { vrCtrls.classList.remove('hidden'); vrCtrls.style.display = 'flex'; }
@@ -6732,6 +6766,7 @@
                 broken.className = 'broken-img';
                 broken.textContent = 'No image';
                 tile.appendChild(broken);
+                img1BrokenImgIndices.add(idx);
             } else {
                 const skel = document.createElement('div');
                 skel.className = 'img-skeleton';
@@ -6747,12 +6782,13 @@
                 img.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block;background:#f8fafc;';
                 const fallbacks = getFallbacks(firstUrl, 400, 72);
                 let fallbackStep = 0;
-                img.addEventListener('load', () => skel.remove());
+                img.addEventListener('load', () => { skel.remove(); img1BrokenImgIndices.delete(idx); });
                 img.addEventListener('error', () => {
                     fallbackStep++;
                     if (fallbackStep < fallbacks.length) { img.src = fallbacks[fallbackStep]; return; }
                     skel.remove();
                     tile.innerHTML += '<div style="position:absolute;inset:0;font-size:9px;color:#94a3b8;display:flex;align-items:center;justify-content:center;">No image</div>';
+                    img1BrokenImgIndices.add(idx);
                 });
                 img.src = fallbacks[0];
                 tile.appendChild(img);
