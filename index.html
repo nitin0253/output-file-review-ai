@@ -1112,7 +1112,7 @@
         <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
             <div>
                 <h3 class="font-bold text-slate-800 text-[17px]">AI classification report</h3>
-                <p class="text-[12px] text-slate-500 mt-0.5"><b id="ai-report-total">0</b> suggestions across Raw, Stock, Hero Angle, and Photo NA. Accept per class, review a tile to override, or dismiss and keep working manually.</p>
+                <p id="ai-report-subtitle" class="text-[12px] text-slate-500 mt-0.5"><b id="ai-report-total">0</b></p>
             </div>
             <button onclick="aiCloseReportModal()" class="text-slate-400 hover:text-slate-600 p-1">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
@@ -5131,6 +5131,7 @@
     let   aiLastRunStats     = null;
     let   aiLastClaudeStats  = null;
     const img1BrokenImgIndices = new Set();  // VIN indices whose first-image tile could not display
+    const aiCollapsedSections  = new Set();  // report sections collapsed by the reviewer
 
     async function aiLoadModel(onStatus) {
         if (aiExtractor) return aiExtractor;
@@ -5514,61 +5515,107 @@
 
     function aiReportBucket() {
         const tid = currentImg1Team?.teamId;
-        const bucket = { ok: [] };
+        const bucket = { ok: [], uncategorized: [] };
         AI_FOCUS_CLASSES.forEach(c => bucket[c] = []);
         if (!tid) return bucket;
         const sug = aiSuggestions[tid] || {};
         Object.entries(sug).forEach(([vinKey, info]) => {
             if (bucket[info.cls]) bucket[info.cls].push({ vinKey, ...info });
         });
-        Object.keys(bucket).forEach(c => bucket[c].sort((a, b) => b.conf - a.conf));
+        // Pending VINs with no suggestion from the last AI pass → "Uncategorized"
+        // so the reviewer can see what still needs a manual decision.
+        (currentImg1VINs || []).forEach((v, idx) => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (st && st !== 'pending') return;              // already reviewed
+            if (sug[aiVinKey(v)]) return;                     // has suggestion
+            bucket.uncategorized.push({ vinKey: aiVinKey(v), cls: 'uncategorized', idx, conf: 0 });
+        });
+        Object.keys(bucket).forEach(c => bucket[c].sort((a, b) => (b.conf || 0) - (a.conf || 0)));
         return bucket;
+    }
+
+    function aiToggleSection(cls) {
+        if (aiCollapsedSections.has(cls)) aiCollapsedSections.delete(cls);
+        else aiCollapsedSections.add(cls);
+        aiOpenReportModal();  // re-render with new collapsed state
     }
 
     function aiOpenReportModal() {
         if (!currentImg1Team) return;
         const bucket = aiReportBucket();
-        const reportClasses = ['ok', ...AI_FOCUS_CLASSES];
-        const total  = reportClasses.reduce((n, c) => n + bucket[c].length, 0);
-        document.getElementById('ai-report-total').textContent = total;
+        const classifiedClasses = ['ok', ...AI_FOCUS_CLASSES];
+        const allReportClasses  = [...classifiedClasses, 'uncategorized'];
+        const suggestedTotal    = classifiedClasses.reduce((n, c) => n + bucket[c].length, 0);
+        const uncatCount        = bucket.uncategorized.length;
+        const subtitleEl = document.getElementById('ai-report-subtitle');
+        if (subtitleEl) {
+            const parts = ['<b>' + suggestedTotal + '</b> suggestion' + (suggestedTotal === 1 ? '' : 's') + ' across OK, Raw, Stock, Hero Angle, Photo NA'];
+            if (uncatCount) parts.push('<b>' + uncatCount + '</b> uncategorized VIN' + (uncatCount === 1 ? '' : 's') + ' pending manual review');
+            subtitleEl.innerHTML = parts.join(' · ') + '. Accept per class, click a tile to override, or dismiss and keep working manually.';
+        }
         const claudeBanner = aiLastClaudeStats
             ? '<div class="mb-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-1.5"><b>✨ Claude pass:</b> ' + aiLastClaudeStats.kept + ' kept · ' + aiLastClaudeStats.dropped + ' dropped as false-positive · ' + aiLastClaudeStats.errored + ' errored (of ' + aiLastClaudeStats.total + ')</div>'
             : '';
+        const colorFor = (c) => c === 'uncategorized' ? '#64748b' : stateColor(c);
+        const labelFor = (c) => c === 'uncategorized' ? 'Uncategorized' : stateLabel(c);
+
         document.getElementById('ai-report-tiles').innerHTML = claudeBanner +
-            '<div class="grid grid-cols-5 gap-2">' +
-            reportClasses.map(c => {
+            '<div class="grid grid-cols-3 md:grid-cols-6 gap-2">' +
+            allReportClasses.map(c => {
                 const n = bucket[c].length;
+                const color = colorFor(c);
+                const label = labelFor(c);
                 const dis = n ? '' : 'opacity:.4;cursor:not-allowed;';
-                return '<div class="rounded-lg p-3" style="background:' + stateColor(c) + '14;border:1px solid ' + stateColor(c) + '55">'
-                    + '<div class="text-[10px] font-bold uppercase tracking-wider" style="color:' + stateColor(c) + '">' + stateLabel(c) + '</div>'
+                let action;
+                if (c === 'uncategorized') {
+                    action = '<div class="mt-2 text-[10px] text-slate-500 text-center px-2 py-1 w-full">Review manually</div>';
+                } else {
+                    action = '<button class="mt-2 text-[11px] font-semibold px-2 py-1 rounded w-full" style="background:' + color + ';color:#fff;' + dis + '"'
+                           + (n ? '' : ' disabled') + ' onclick="aiAcceptClass(\'' + c + '\')">Accept all</button>';
+                }
+                return '<div class="rounded-lg p-3" style="background:' + color + '14;border:1px solid ' + color + '55">'
+                    + '<div class="text-[10px] font-bold uppercase tracking-wider" style="color:' + color + '">' + label + '</div>'
                     + '<div class="text-2xl font-bold text-slate-800">' + n + '</div>'
-                    + '<button class="mt-2 text-[11px] font-semibold px-2 py-1 rounded w-full" style="background:' + stateColor(c) + ';color:#fff;' + dis + '"'
-                    + (n ? '' : ' disabled') + ' onclick="aiAcceptClass(\'' + c + '\')">Accept all</button>'
+                    + action
                     + '</div>';
             }).join('') + '</div>';
 
+        const chevron = (collapsed) => collapsed
+            ? '<svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5l7 7-7 7"/></svg>'
+            : '<svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>';
+
         const body = document.getElementById('ai-report-body');
-        body.innerHTML = reportClasses.map(c => {
+        body.innerHTML = allReportClasses.map(c => {
             if (!bucket[c].length) return '';
-            return '<div class="mb-5">'
-                + '<div class="text-[12px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2" style="color:' + stateColor(c) + '">'
-                + '<span style="width:10px;height:10px;border-radius:3px;background:' + stateColor(c) + ';display:inline-block"></span>' + stateLabel(c)
-                + ' <span class="text-slate-400">(' + bucket[c].length + ')</span></div>'
-                + '<div class="grid grid-cols-6 md:grid-cols-8 gap-2">'
-                + bucket[c].map(item => {
-                    const v = currentImg1VINs[item.idx];
-                    const url = (v && v.urls && v.urls[0]) || '';
-                    const vinShort = (v && v.vin ? v.vin : '').slice(-8);
-                    const verifiedBadge = item.claudeVerified ? '<div style="position:absolute;top:3px;left:3px;background:#4f46e5;color:#fff;font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px" title="Verified by Claude: ' + (item.claudeReason || '') + '">✨</div>' : '';
-                    const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%'];
-                    if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
-                    return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + tipParts.join(' — ') + '" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
+            const color = colorFor(c);
+            const label = labelFor(c);
+            const collapsed = aiCollapsedSections.has(c);
+            const header = '<button type="button" onclick="aiToggleSection(\'' + c + '\')" class="w-full text-left text-[12px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2 hover:opacity-80" style="color:' + color + '">'
+                + chevron(collapsed)
+                + '<span style="width:10px;height:10px;border-radius:3px;background:' + color + ';display:inline-block"></span>' + label
+                + ' <span class="text-slate-400">(' + bucket[c].length + ')</span></button>';
+            if (collapsed) return '<div class="mb-5">' + header + '</div>';
+
+            const items = bucket[c].map(item => {
+                const v = currentImg1VINs[item.idx];
+                const url = (v && v.urls && v.urls[0]) || '';
+                const vinShort = (v && v.vin ? v.vin : '').slice(-8);
+                if (c === 'uncategorized') {
+                    return '<div class="relative rounded border border-slate-200 overflow-hidden" title="' + (v?.vin || '') + ' — pending manual review">'
                         + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
-                        + verifiedBadge
-                        + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
+                        + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(100,116,139,.78)">' + vinShort + ' · pending</div>'
                         + '</div>';
-                }).join('')
-                + '</div></div>';
+                }
+                const verifiedBadge = item.claudeVerified ? '<div style="position:absolute;top:3px;left:3px;background:#4f46e5;color:#fff;font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px" title="Verified by Claude: ' + (item.claudeReason || '') + '">✨</div>' : '';
+                const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%'];
+                if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
+                return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + tipParts.join(' — ') + '" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
+                    + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
+                    + verifiedBadge
+                    + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
+                    + '</div>';
+            }).join('');
+            return '<div class="mb-5">' + header + '<div class="grid grid-cols-6 md:grid-cols-8 gap-2">' + items + '</div></div>';
         }).join('') || ('<div class="text-center text-slate-500 text-sm py-6">No suggestions above the confidence threshold.</div>' + aiRenderDiagnostics());
 
         document.getElementById('ai-report-modal').classList.add('active');
@@ -5613,6 +5660,7 @@
     }
 
     function aiAcceptClass(cls) {
+        if (cls === 'uncategorized') return;   // not a real review state
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
         const bucket = aiReportBucket()[cls] || [];
