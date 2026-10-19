@@ -1294,6 +1294,26 @@
     // Per-user localStorage keys — reviews are isolated per reviewer
     function storageKey()     { return 'spyne_reviews_v2_' + (getCurrentUser() || 'anon'); }
     function storageKey1Img() { return 'spyne_1img_v2_'   + (getCurrentUser() || 'anon'); }
+    function storageKey1ImgDone() { return 'spyne_1img_done_' + (getCurrentUser() || 'anon'); }
+
+    function getLocalDoneRooftops() {
+        try {
+            const raw = localStorage.getItem(storageKey1ImgDone());
+            if (!raw) return new Set();
+            const arr = JSON.parse(raw);
+            return new Set(Array.isArray(arr) ? arr : []);
+        } catch (_) { return new Set(); }
+    }
+    function addLocalDoneRooftop(name) {
+        if (!name) return;
+        try {
+            const key = String(name).replace(/\.csv$/i, '').trim().toLowerCase();
+            if (!key) return;
+            const s = getLocalDoneRooftops();
+            s.add(key);
+            localStorage.setItem(storageKey1ImgDone(), JSON.stringify([...s]));
+        } catch (_) {}
+    }
 
     // Pure-JS SHA-256 — works on file:// (crypto.subtle requires HTTPS/localhost)
 
@@ -2509,14 +2529,15 @@
         // Rows we RENDER = everything not already reviewed. Reviewed ones stay hidden
         // (counted in the note). Claimed-by-another are SHOWN greyed + labelled with WHO
         // holds them (so reviewers can see who picked a rooftop instead of it just vanishing).
+        const localDone = getLocalDoneRooftops();
         const shown = allCsvs.filter(f => {
             const rooftop = (f.name || '').replace(/\.csv$/i, '').trim().toLowerCase();
-            return !drivePickState.reviewed.has(rooftop);
+            return !drivePickState.reviewed.has(rooftop) && !localDone.has(rooftop);
         });
         let reviewedCount = 0;
         allCsvs.forEach(f => {
             const rooftop = (f.name || '').replace(/\.csv$/i, '').trim().toLowerCase();
-            if (drivePickState.reviewed.has(rooftop)) reviewedCount++;
+            if (drivePickState.reviewed.has(rooftop) || localDone.has(rooftop)) reviewedCount++;
         });
         const hiddenNote = reviewedCount
             ? '<div class="text-[11px] text-slate-400 px-2 pt-1">Hidden: ' + reviewedCount + ' already reviewed</div>'
@@ -2643,7 +2664,9 @@
         driveTextCache.clear();
         driveRowCounts.clear();
         const el = document.getElementById('drive-browser');
-        if (el) el.innerHTML = '<div class="text-[12px] text-slate-400 py-6 text-center">Loading…</div>';
+        if (el) el.innerHTML = '<div class="py-8 flex flex-col items-center justify-center gap-3 text-slate-500">'
+            + '<div class="spinner-blue" style="width:22px;height:22px;border-width:3px"></div>'
+            + '<div class="text-[12px]">Loading folders…</div></div>';
         try {
             const [name, children] = await Promise.all([
                 getDriveFolderName(folderId),
@@ -2668,7 +2691,12 @@
         if (childId) {
             const child  = (driveLevels[i].folders || []).find(f => f.id === childId);
             const status = document.getElementById('drive-load-status');
-            if (status) { status.textContent = 'Opening ' + (child ? child.name : 'folder') + '…'; status.classList.remove('hidden'); }
+            if (status) {
+                status.innerHTML = '<span class="inline-flex items-center gap-1.5">'
+                    + '<span class="spinner-blue" style="display:inline-block;width:10px;height:10px;border-width:2px;vertical-align:middle"></span>'
+                    + '<span>Opening ' + escapeHtml(child ? child.name : 'folder') + '…</span></span>';
+                status.classList.remove('hidden');
+            }
             try {
                 const { folders, csvs } = await listDriveChildren(childId);
                 driveLevels.push({ id: childId, name: child ? child.name : 'Folder', folders, csvs, selectedId: null });
@@ -5084,7 +5112,7 @@
 
     function aiSampleCountsByClass() {
         const tid = currentImg1Team?.teamId;
-        const counts = {};
+        const counts = { ok: 0 };
         AI_FOCUS_CLASSES.forEach(c => counts[c] = 0);
         if (!tid) return counts;
         (currentImg1VINs || []).forEach(v => {
@@ -5092,6 +5120,11 @@
             if (counts[st] !== undefined) counts[st]++;
         });
         return counts;
+    }
+
+    function aiAnySampleTagged() {
+        const c = aiSampleCountsByClass();
+        return c.ok > 0 || AI_FOCUS_CLASSES.some(cls => c[cls] > 0);
     }
 
     function aiAllClassesMeetThreshold() {
@@ -5135,7 +5168,7 @@
         aiUpdateFab();
         const tid = currentImg1Team.teamId;
         if (aiAutoOpenedTeams.has(tid)) return;
-        if (!aiAllClassesMeetThreshold()) return;
+        if (!aiAnySampleTagged()) return;
         aiAutoOpenedTeams.add(tid);
         aiOpenPromptModal();
     }
@@ -5145,7 +5178,7 @@
         const counts = aiSampleCountsByClass();
         const pending = aiPendingVINIndices().length;
         document.getElementById('ai-prompt-counts').innerHTML =
-            AI_FOCUS_CLASSES.map(c =>
+            ['ok', ...AI_FOCUS_CLASSES].map(c =>
                 '<div class="flex items-center gap-2"><span style="width:10px;height:10px;border-radius:3px;background:' + stateColor(c) + ';display:inline-block"></span><span class="text-slate-600">' + stateLabel(c) + ':</span><b class="text-slate-900">' + counts[c] + '</b></div>'
             ).join('');
         document.getElementById('ai-prompt-pending').textContent = pending;
@@ -5229,12 +5262,11 @@
                             else if (s > secondSim) { secondSim = s; }
                         }
                         if (bestSim > stats.maxSim) stats.maxSim = bestSim;
-                        if (bestCls === 'ok') {
-                            stats.pendingAsOk++;
-                        } else if (bestCls && AI_FOCUS_CLASSES.includes(bestCls) && bestSim >= AI_SIM_THRESHOLD) {
+                        if (bestCls && (bestCls === 'ok' || AI_FOCUS_CLASSES.includes(bestCls))) {
                             const margin = bestSim - secondSim;
-                            if (margin >= AI_MARGIN) {
+                            if (bestSim >= AI_SIM_THRESHOLD && margin >= AI_MARGIN) {
                                 aiSuggestions[tid][aiVinKey(v)] = { cls: bestCls, conf: bestSim, margin, idx };
+                                if (bestCls === 'ok') stats.pendingAsOk++;
                             } else {
                                 stats.pendingBelowMargin++;
                             }
@@ -5266,28 +5298,29 @@
 
     function aiReportBucket() {
         const tid = currentImg1Team?.teamId;
-        const bucket = {};
+        const bucket = { ok: [] };
         AI_FOCUS_CLASSES.forEach(c => bucket[c] = []);
         if (!tid) return bucket;
         const sug = aiSuggestions[tid] || {};
         Object.entries(sug).forEach(([vinKey, info]) => {
             if (bucket[info.cls]) bucket[info.cls].push({ vinKey, ...info });
         });
-        AI_FOCUS_CLASSES.forEach(c => bucket[c].sort((a, b) => b.conf - a.conf));
+        Object.keys(bucket).forEach(c => bucket[c].sort((a, b) => b.conf - a.conf));
         return bucket;
     }
 
     function aiOpenReportModal() {
         if (!currentImg1Team) return;
         const bucket = aiReportBucket();
-        const total  = AI_FOCUS_CLASSES.reduce((n, c) => n + bucket[c].length, 0);
+        const reportClasses = ['ok', ...AI_FOCUS_CLASSES];
+        const total  = reportClasses.reduce((n, c) => n + bucket[c].length, 0);
         document.getElementById('ai-report-total').textContent = total;
         const claudeBanner = aiLastClaudeStats
             ? '<div class="mb-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-1.5"><b>✨ Claude pass:</b> ' + aiLastClaudeStats.kept + ' kept · ' + aiLastClaudeStats.dropped + ' dropped as false-positive · ' + aiLastClaudeStats.errored + ' errored (of ' + aiLastClaudeStats.total + ')</div>'
             : '';
         document.getElementById('ai-report-tiles').innerHTML = claudeBanner +
-            '<div class="grid grid-cols-4 gap-2">' +
-            AI_FOCUS_CLASSES.map(c => {
+            '<div class="grid grid-cols-5 gap-2">' +
+            reportClasses.map(c => {
                 const n = bucket[c].length;
                 const dis = n ? '' : 'opacity:.4;cursor:not-allowed;';
                 return '<div class="rounded-lg p-3" style="background:' + stateColor(c) + '14;border:1px solid ' + stateColor(c) + '55">'
@@ -5299,7 +5332,7 @@
             }).join('') + '</div>';
 
         const body = document.getElementById('ai-report-body');
-        body.innerHTML = AI_FOCUS_CLASSES.map(c => {
+        body.innerHTML = reportClasses.map(c => {
             if (!bucket[c].length) return '';
             return '<div class="mb-5">'
                 + '<div class="text-[12px] font-bold uppercase tracking-wider mb-2 flex items-center gap-2" style="color:' + stateColor(c) + '">'
@@ -5388,7 +5421,7 @@
     }
 
     function aiAcceptAll() {
-        AI_FOCUS_CLASSES.forEach(c => aiAcceptClass(c));
+        ['ok', ...AI_FOCUS_CLASSES].forEach(c => aiAcceptClass(c));
         aiCloseReportModal();
         try { render1ImgGallery(); } catch (_) {}
     }
@@ -7026,6 +7059,7 @@
             // Instant UX: download the CSV and return to the dashboard right away.
             // The BigQuery save runs in the BACKGROUND (retries up to 3×, then a
             // sticky alert if it still fails — the CSV is already saved either way).
+            addLocalDoneRooftop(currentImg1Team?.rooftop || currentImg1Team?.name || '');
             download1ImgCSV();
             closeCompleteModal();
             restore1ImgMode();
@@ -7046,6 +7080,7 @@
     // CSV-only export (1st-image mode): download the CSV and exit WITHOUT pushing
     // to BigQuery (and, with Sheet writing disabled, nothing is stored server-side).
     document.getElementById('complete-csvonly-btn').addEventListener('click', () => {
+        addLocalDoneRooftop(currentImg1Team?.rooftop || currentImg1Team?.name || '');
         download1ImgCSV();
         closeCompleteModal();
         restore1ImgMode();
