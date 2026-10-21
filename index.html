@@ -353,6 +353,10 @@
                 <div class="relative">
                     <input id="vin-search" type="text" placeholder="Search VIN..." class="pl-3 pr-8 py-1.5 border border-slate-200 rounded-lg text-[12px] w-44 focus:ring-1 focus:ring-blue-500 outline-none transition">
                 </div>
+                <button id="ai-report-btn" onclick="aiOpenReportModal()" class="hidden bg-indigo-50 hover:bg-indigo-100 text-indigo-700 px-3 py-1.5 rounded text-[11px] font-bold items-center space-x-1.5 border border-indigo-200" title="Re-open the last AI classification report" style="display:none">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                    <span>AI Report</span>
+                </button>
                 <button onclick="aiOpenCountsModal()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded text-[11px] font-bold flex items-center space-x-1.5 border border-slate-200" title="Review category counts">
                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
                     <span>Counts</span>
@@ -5185,6 +5189,18 @@
         const reviewActive = document.getElementById('page-review')?.classList.contains('active');
         const inImg1Mode   = typeof reviewMode !== 'undefined' && reviewMode === '1img';
         fab.classList.toggle('visible', !!currentImg1Team && !!reviewActive && !!inImg1Mode);
+        aiUpdateReportBtn();
+    }
+
+    function aiUpdateReportBtn() {
+        const btn = document.getElementById('ai-report-btn');
+        if (!btn) return;
+        const tid = currentImg1Team?.teamId;
+        const hasRun = !!aiLastRunStats || (tid && Object.keys(aiSuggestions[tid] || {}).length > 0);
+        const reviewActive = document.getElementById('page-review')?.classList.contains('active');
+        const inImg1Mode   = typeof reviewMode !== 'undefined' && reviewMode === '1img';
+        const show = !!hasRun && !!reviewActive && !!inImg1Mode;
+        btn.style.display = show ? 'inline-flex' : 'none';
     }
 
     function aiMaybeShowPrompt() {
@@ -5834,6 +5850,9 @@
         const items = [];
         if (inReview) {
             items.push({ label: 'Analyze with AI',       hint: 'Run few-shot CLIP classifier',   action: () => aiOpenPromptModal(), disabled: aiRunInFlight });
+            const tid = currentImg1Team?.teamId;
+            const hasAiRun = !!aiLastRunStats || (tid && Object.keys(aiSuggestions[tid] || {}).length > 0);
+            if (hasAiRun) items.push({ label: 'AI classification report', hint: 'Re-open the last run report', action: () => aiOpenReportModal() });
             items.push({ label: 'Review summary',        hint: 'Per-class counts + VIN table',   action: () => openImg1Summary() });
             items.push({ label: 'Finish review (Done)',  hint: 'Open the completion flow',       action: () => { try { document.getElementById('complete-ok-btn')?.click(); } catch (_) {} } });
         }
