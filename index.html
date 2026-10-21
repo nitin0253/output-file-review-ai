@@ -805,7 +805,7 @@
             </div>
             <p id="ai-progress-msg" class="text-[11px] text-slate-500 truncate mt-0.5">Loading…</p>
             <div class="ai-progress-bar mt-2" style="height:4px"><div id="ai-progress-fill" class="ai-progress-fill" style="width:0%"></div></div>
-            <div class="text-[10px] text-slate-400 mt-1 text-right"><span id="ai-progress-count">0/0</span> · marking stays active</div>
+            <div class="text-[10px] text-slate-400 mt-1 text-right"><span id="ai-progress-count">0/0</span> · <span id="ai-progress-lock-hint">marking is paused until the run finishes</span></div>
         </div>
     </div>
 </div>
@@ -3377,6 +3377,17 @@
     // target already holds this value, clear it instead. value === null clears.
     function applyImg1Issue(value) {
         if (!currentImg1Team) return;
+        // Marking is locked while a CLIP run is in flight so manual marks can't
+        // race with the AI's suggestion-write path. The toast fires at most once
+        // per run — frequent attempts would otherwise spam the screen.
+        if (aiRunInFlight) {
+            if (!applyImg1Issue._toastedThisRun) {
+                applyImg1Issue._toastedThisRun = true;
+                try { aiFlashPillLock(); } catch (_) {}
+            }
+            return;
+        }
+        applyImg1Issue._toastedThisRun = false;
         // Did this action target a MULTI-selection (vs. just the focused tile)?
         const usedSelection = (img1ViewMode === 'grid' && selectedVINIndices && selectedVINIndices.size > 0);
         const targets = img1IssueTargets();
@@ -5242,6 +5253,18 @@
         try { aiUpdateFab(); } catch (_) {}
     }
 
+    // Brief visual nudge when the reviewer tries to mark during a run — flashes
+    // the pill's lock hint from amber back to slate so the "paused" line is
+    // obvious without a disruptive toast or alert.
+    function aiFlashPillLock() {
+        const hint = document.getElementById('ai-progress-lock-hint');
+        if (!hint) return;
+        hint.style.color = '#dc2626';
+        hint.style.fontWeight = '700';
+        clearTimeout(aiFlashPillLock._t);
+        aiFlashPillLock._t = setTimeout(() => { hint.style.color = ''; hint.style.fontWeight = ''; }, 900);
+    }
+
     async function aiRunAnalysis() {
         aiClosePromptModal();
         const tid = currentImg1Team?.teamId;
@@ -5749,6 +5772,7 @@
         if (aiUncatFocusedIdx < 0) return;
         e.preventDefault();
         e.stopPropagation();
+        if (aiRunInFlight) { try { aiFlashPillLock(); } catch (_) {} return; }
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
         const v = currentImg1VINs[aiUncatFocusedIdx];
