@@ -1106,16 +1106,21 @@
     </div>
 </div>
 
-<div id="ai-progress-modal" class="modal-overlay">
-    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md">
-        <div class="p-6">
-            <h3 class="text-slate-800 font-bold text-[18px] mb-1">Analyzing with AI</h3>
-            <p id="ai-progress-msg" class="text-slate-500 text-[13px] mb-4">Loading model…</p>
-            <div class="ai-progress-bar mb-2"><div id="ai-progress-fill" class="ai-progress-fill" style="width:0%"></div></div>
-            <div class="flex items-center justify-between text-[12px] text-slate-500">
-                <span id="ai-progress-count">0/0</span>
-                <button onclick="aiCancelAnalysis()" class="text-rose-600 hover:text-rose-700 font-semibold">Cancel</button>
+<!-- Non-blocking progress pill: lives bottom-right (above the FAB slot).
+     Reviewer keeps marking manually while CLIP runs in the background. -->
+<div id="ai-progress-pill" class="hidden fixed bottom-6 right-6 z-[86] bg-white border border-indigo-200 rounded-xl shadow-xl p-3 w-80">
+    <div class="flex items-start gap-3">
+        <div class="spinner-blue flex-shrink-0 mt-0.5" style="width:16px;height:16px;border-width:2px"></div>
+        <div class="flex-1 min-w-0">
+            <div class="text-[12px] font-semibold text-slate-800 flex items-center justify-between gap-2">
+                <span class="truncate">Analyzing with AI</span>
+                <button onclick="aiCancelAnalysis()" title="Cancel" class="text-slate-400 hover:text-rose-500 flex-shrink-0" style="line-height:1">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
             </div>
+            <p id="ai-progress-msg" class="text-[11px] text-slate-500 truncate mt-0.5">Loading…</p>
+            <div class="ai-progress-bar mt-2" style="height:4px"><div id="ai-progress-fill" class="ai-progress-fill" style="width:0%"></div></div>
+            <div class="text-[10px] text-slate-400 mt-1 text-right"><span id="ai-progress-count">0/0</span> · marking stays active</div>
         </div>
     </div>
 </div>
@@ -1146,6 +1151,17 @@
                 <button onclick="aiSubmitUncat()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-5 py-2 rounded-lg text-[13px]">Submit review ✓</button>
             </div>
         </div>
+    </div>
+</div>
+
+<div id="cmdk-modal" class="modal-overlay" onclick="if(event.target===this)cmdkClose()" style="align-items:flex-start;padding-top:12vh">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl overflow-hidden">
+        <div class="flex items-center gap-2 px-4 border-b border-slate-200">
+            <svg class="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+            <input id="cmdk-input" type="text" placeholder="Type a command or VIN…" class="w-full py-3 text-[14px] outline-none" autocomplete="off" spellcheck="false">
+            <kbd class="text-[10px] text-slate-400 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 font-mono">Esc</kbd>
+        </div>
+        <div id="cmdk-list" class="max-h-80 overflow-y-auto p-1"></div>
     </div>
 </div>
 
@@ -5492,16 +5508,31 @@
         document.getElementById('ai-prompt-modal').classList.remove('active');
     }
 
+    let aiRunInFlight = false;
+
+    function aiShowProgressPill()  {
+        const pill = document.getElementById('ai-progress-pill');
+        if (pill) pill.classList.remove('hidden');
+        const fab = document.getElementById('ai-fab');
+        if (fab) fab.classList.remove('visible');
+    }
+    function aiHideProgressPill() {
+        const pill = document.getElementById('ai-progress-pill');
+        if (pill) pill.classList.add('hidden');
+        try { aiUpdateFab(); } catch (_) {}
+    }
+
     async function aiRunAnalysis() {
         aiClosePromptModal();
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
+        if (aiRunInFlight) return;                     // prevent re-trigger during run
+        aiRunInFlight = true;
         const myToken = ++aiRunToken;
-        const progModal = document.getElementById('ai-progress-modal');
         const progFill  = document.getElementById('ai-progress-fill');
         const progMsg   = document.getElementById('ai-progress-msg');
         const progCount = document.getElementById('ai-progress-count');
-        progModal.classList.add('active');
+        aiShowProgressPill();
         progFill.style.width = '0%';
         progCount.textContent = '0/0';
         progMsg.textContent = 'Loading CLIP model…';
@@ -5642,18 +5673,20 @@
 
             aiLastRunStats = stats;
             console.log('[AI classifier] run stats', stats);
-            progModal.classList.remove('active');
+            aiRunInFlight = false;
+            aiHideProgressPill();
             try { render1ImgGallery(); } catch (_) {}
             aiOpenReportModal();
         } catch (err) {
             progMsg.textContent = 'Error: ' + ((err && err.message) || err);
-            setTimeout(() => progModal.classList.remove('active'), 3000);
+            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 3000);
         }
     }
 
     function aiCancelAnalysis() {
         aiRunToken++;
-        document.getElementById('ai-progress-modal').classList.remove('active');
+        aiRunInFlight = false;
+        aiHideProgressPill();
     }
 
     function aiReportBucket() {
@@ -5663,7 +5696,14 @@
         if (!tid) return bucket;
         const sug = aiSuggestions[tid] || {};
         Object.entries(sug).forEach(([vinKey, info]) => {
-            if (bucket[info.cls]) bucket[info.cls].push({ vinKey, ...info });
+            if (!bucket[info.cls]) return;
+            // Skip suggestions where the reviewer already marked the VIN
+            // (e.g. mid-run manual marks under the non-blocking progress pill).
+            const v = currentImg1VINs[info.idx];
+            if (!v) return;
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (st && st !== 'pending') return;
+            bucket[info.cls].push({ vinKey, ...info });
         });
         // Pending VINs with no suggestion from the last AI pass → "Uncategorized"
         // so the reviewer can see what still needs a manual decision.
@@ -5749,13 +5789,13 @@
                         + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(100,116,139,.78)">' + vinShort + ' · pending</div>'
                         + '</div>';
                 }
-                const verifiedBadge = item.claudeVerified ? '<div style="position:absolute;top:3px;left:3px;background:#4f46e5;color:#fff;font-size:9px;font-weight:700;padding:1px 4px;border-radius:3px" title="Verified by Claude: ' + (item.claudeReason || '') + '">✨</div>' : '';
                 const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%'];
                 if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
+                // Shared tile-overlay contract: ✨ inlined into the bottom confidence
+                // overlay instead of competing with a top-corner badge.
                 return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + tipParts.join(' — ') + '" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
                     + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
-                    + verifiedBadge
-                    + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
+                    + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.claudeVerified ? '✨ ' : '') + (item.conf * 100).toFixed(0) + '%</div>'
                     + '</div>';
             }).join('');
             return '<div class="mb-5">' + header + '<div class="grid grid-cols-6 md:grid-cols-8 gap-2">' + items + '</div></div>';
@@ -5967,6 +6007,121 @@
     function aiOpenCheatsheet()  { document.getElementById('ai-cheatsheet-modal').classList.add('active'); }
     function aiCloseCheatsheet() { document.getElementById('ai-cheatsheet-modal').classList.remove('active'); }
 
+    // ── Command palette (Cmd/Ctrl + K) ────────────────────────────────────
+    let cmdkOpen = false;
+    let cmdkHighlight = 0;
+    let cmdkFiltered = [];
+
+    function cmdkActions() {
+        const inReview = typeof reviewMode !== 'undefined' && reviewMode === '1img' && !!currentImg1Team;
+        const items = [];
+        if (inReview) {
+            items.push({ label: 'Analyze with AI',       hint: 'Run few-shot CLIP classifier',   action: () => aiOpenPromptModal(), disabled: aiRunInFlight });
+            items.push({ label: 'Review summary',        hint: 'Per-class counts + VIN table',   action: () => openImg1Summary() });
+            items.push({ label: 'Finish review (Done)',  hint: 'Open the completion flow',       action: () => { try { document.getElementById('complete-ok-btn')?.click(); } catch (_) {} } });
+        }
+        items.push({ label: 'Keyboard shortcuts',    hint: 'Open the cheatsheet',            action: () => aiOpenCheatsheet() });
+        items.push({ label: 'Resume last rooftop',   hint: 'Reopen the last Drive CSV load', action: () => { showPage('page-login'); setDataSource('drive'); setTimeout(() => document.getElementById('resume-last-rooftop-btn')?.click(), 50); }, hidden: !loadLastRooftop() });
+        items.push({ label: 'Go to login',           hint: 'Back to the data-source picker',  action: () => showPage('page-login') });
+        return items.filter(x => !x.hidden);
+    }
+
+    function cmdkVinMatches(query) {
+        if (!query || !currentImg1Team || !currentImg1VINs) return [];
+        const q = query.toUpperCase();
+        const out = [];
+        for (let i = 0; i < currentImg1VINs.length && out.length < 10; i++) {
+            if ((currentImg1VINs[i].vin || '').toUpperCase().includes(q)) {
+                out.push({ label: 'Jump to VIN ' + currentImg1VINs[i].vin, hint: 'Focus and scroll into view', action: ((idx) => () => cmdkJumpToVin(idx))(i), vin: true });
+            }
+        }
+        return out;
+    }
+
+    function cmdkJumpToVin(idx) {
+        try {
+            currentImg1Idx = idx;
+            const tile = document.getElementById('img1-tile-' + idx);
+            if (tile) {
+                tile.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                tile.style.transition = 'box-shadow .4s ease';
+                tile.style.boxShadow = '0 0 0 4px #4f46e5';
+                setTimeout(() => { tile.style.boxShadow = ''; }, 1500);
+            }
+            if (typeof select1ImgVIN === 'function') select1ImgVIN(idx);
+        } catch (_) {}
+    }
+
+    function cmdkRender() {
+        const q = (document.getElementById('cmdk-input').value || '').trim().toLowerCase();
+        const actions = cmdkActions().filter(a => !q || a.label.toLowerCase().includes(q) || (a.hint && a.hint.toLowerCase().includes(q)));
+        const vins = cmdkVinMatches(q);
+        cmdkFiltered = [...actions, ...vins];
+        if (cmdkHighlight >= cmdkFiltered.length) cmdkHighlight = 0;
+        const list = document.getElementById('cmdk-list');
+        if (!cmdkFiltered.length) {
+            list.innerHTML = '<div class="text-center text-slate-400 text-[12px] py-6">No matches</div>';
+            return;
+        }
+        list.innerHTML = cmdkFiltered.map((it, i) => {
+            const sel = i === cmdkHighlight;
+            const bg = sel ? 'background:#eef2ff;' : '';
+            const disabled = it.disabled ? 'opacity:.4;cursor:not-allowed;' : '';
+            return '<div data-cmdk-i="' + i + '" class="flex items-center justify-between gap-3 px-3 py-2 rounded cursor-pointer hover:bg-slate-50 text-[13px]" style="' + bg + disabled + '" onmouseenter="cmdkSetHighlight(' + i + ')" onclick="cmdkActivate(' + i + ')">'
+                + '<div class="flex-1 min-w-0 truncate">' + (it.vin ? '<span style="color:#4f46e5">#</span> ' : '') + '<b class="text-slate-800">' + it.label + '</b>'
+                + (it.hint ? '<span class="text-slate-400 ml-2 text-[11px]">' + it.hint + '</span>' : '') + '</div>'
+                + (sel ? '<kbd class="text-[10px] text-slate-500 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5 font-mono flex-shrink-0">Enter</kbd>' : '')
+                + '</div>';
+        }).join('');
+        // Scroll highlighted into view
+        const el = list.querySelector('[data-cmdk-i="' + cmdkHighlight + '"]');
+        if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+    }
+
+    function cmdkSetHighlight(i) { cmdkHighlight = i; cmdkRender(); }
+
+    function cmdkActivate(i) {
+        const it = cmdkFiltered[i];
+        if (!it || it.disabled) return;
+        cmdkClose();
+        try { it.action(); } catch (err) { console.error('[cmdk] action failed', err); }
+    }
+
+    function cmdkOpenPalette() {
+        cmdkOpen = true;
+        cmdkHighlight = 0;
+        document.getElementById('cmdk-modal').classList.add('active');
+        const input = document.getElementById('cmdk-input');
+        input.value = '';
+        cmdkRender();
+        setTimeout(() => input.focus(), 50);
+    }
+
+    function cmdkClose() {
+        cmdkOpen = false;
+        document.getElementById('cmdk-modal').classList.remove('active');
+    }
+
+    document.addEventListener('keydown', function (e) {
+        // Global open
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+            e.preventDefault();
+            cmdkOpenPalette();
+            return;
+        }
+        if (!cmdkOpen) return;
+        if (e.key === 'Escape')     { e.preventDefault(); cmdkClose(); return; }
+        if (e.key === 'ArrowDown')  { e.preventDefault(); cmdkHighlight = Math.min(cmdkFiltered.length - 1, cmdkHighlight + 1); cmdkRender(); return; }
+        if (e.key === 'ArrowUp')    { e.preventDefault(); cmdkHighlight = Math.max(0, cmdkHighlight - 1); cmdkRender(); return; }
+        if (e.key === 'Enter')      { e.preventDefault(); cmdkActivate(cmdkHighlight); return; }
+    }, true);
+
+    // Input events hook up once the DOM has rendered
+    document.addEventListener('DOMContentLoaded', () => {
+        const inp = document.getElementById('cmdk-input');
+        if (inp) inp.addEventListener('input', () => { cmdkHighlight = 0; cmdkRender(); });
+    });
+
     function aiOverlaySuggestion(tile, v) {
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
@@ -5979,7 +6134,7 @@
             tile.style.outlineOffset = '-2px';
             const chip = document.createElement('div');
             chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
-            chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
+            chip.textContent = (info.claudeVerified ? '✨ ' : '') + stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
             tile.appendChild(chip);
         } else if (aiLastRunStats) {
             // AI ran but didn't produce a suggestion for this VIN → uncategorized.
@@ -6075,12 +6230,13 @@
         const key = aiEnsureClaudeKey();
         if (!key) return;
         const myToken = ++aiRunToken;
-        const progModal = document.getElementById('ai-progress-modal');
+        if (aiRunInFlight) return;
+        aiRunInFlight = true;
         const progFill  = document.getElementById('ai-progress-fill');
         const progMsg   = document.getElementById('ai-progress-msg');
         const progCount = document.getElementById('ai-progress-count');
         aiCloseReportModal();
-        progModal.classList.add('active');
+        aiShowProgressPill();
         progFill.style.width = '0%';
         progMsg.textContent = 'Verifying Hero Angle with Claude Vision…';
         progCount.textContent = '0/' + candidates.length;
@@ -6120,7 +6276,8 @@
         }
         aiLastClaudeStats = { kept, dropped, errored, total: candidates.length };
         console.log('[AI classifier] Claude verify stats', aiLastClaudeStats);
-        progModal.classList.remove('active');
+        aiRunInFlight = false;
+        aiHideProgressPill();
         try { render1ImgGallery(); } catch (_) {}
         aiOpenReportModal();
     }
