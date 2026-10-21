@@ -776,6 +776,9 @@
                     </div>
                 </div>
 
+                <!-- Category filter chips — show only tiles matching the chosen state -->
+                <div id="grid-filter-bar" class="hidden items-center flex-wrap gap-1 bg-slate-50 px-6 py-2 border-b border-slate-100 flex-shrink-0"></div>
+
                 <!-- Selection toolbar (1st-image multi-select) — lives in the top bar so it stays visible when the left panel is hidden -->
                 <div id="grid-select-bar" class="hidden items-center flex-wrap gap-1 bg-white px-6 py-2 border-b border-slate-100 flex-shrink-0">
                     <span class="text-[9px] font-bold uppercase tracking-wide text-slate-400 mr-0.5">Select</span>
@@ -6064,6 +6067,81 @@
     // source of truth so there's one place to see category breakdowns.
     function aiOpenCountsModal() { try { openImg1Summary(); } catch (_) {} }
 
+    // ── Grid category filter chips ────────────────────────────────────────
+    let img1GridFilter = 'all';   // 'all' | state key | 'pending' | 'uncat'
+
+    function renderGridFilterChips() {
+        const bar = document.getElementById('grid-filter-bar');
+        if (!bar) return;
+        const tid = currentImg1Team?.teamId;
+        if (!tid || !currentImg1VINs?.length) { bar.classList.add('hidden'); return; }
+        bar.classList.remove('hidden');
+
+        const counts = { all: currentImg1VINs.length, pending: 0, uncat: 0 };
+        const sug = aiSuggestions[tid] || {};
+        currentImg1VINs.forEach(v => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '') || 'pending';
+            counts[st] = (counts[st] || 0) + 1;
+            if (st === 'pending' && aiLastRunStats && !sug[aiVinKey(v)]) counts.uncat++;
+        });
+
+        const chips = [
+            { key:'all',         label:'All',           color:'#64748b' },
+            { key:'pending',     label:'Pending',       color:'#f59e0b' },
+            { key:'uncat',       label:'Uncategorized', color:'#f59e0b' },
+            { key:'ok',          label:'OK',            color:stateColor('ok') },
+            { key:'raw',         label:'Raw',           color:stateColor('raw') },
+            { key:'stock',       label:'Stock',         color:stateColor('stock') },
+            { key:'hero',        label:'Hero Angle',    color:stateColor('hero') },
+            { key:'photo_na',    label:'Photo NA',      color:stateColor('photo_na') },
+            { key:'issue',       label:'Bad Input',     color:stateColor('issue') },
+            { key:'banner',      label:'Banner',        color:stateColor('banner') },
+            { key:'background',  label:'Background',    color:stateColor('background') },
+            { key:'quality',     label:'Quality',       color:stateColor('quality') },
+            { key:'unsupported', label:'Unsupported',   color:stateColor('unsupported') },
+            { key:'sequence',    label:'Error',         color:stateColor('sequence') },
+        ];
+
+        const htmlParts = ['<span class="text-[9px] font-bold uppercase tracking-wide text-slate-400 mr-0.5">Show</span>'];
+        chips.forEach(c => {
+            const n = counts[c.key] || 0;
+            if (c.key !== 'all' && n === 0) return;   // hide zero-count chips to keep the row tight
+            const active = img1GridFilter === c.key;
+            const style = active
+                ? 'background:' + c.color + ';color:#fff;border-color:' + c.color
+                : 'background:#fff;color:' + c.color + ';border-color:' + c.color + '55';
+            htmlParts.push('<button type="button" onclick="setGridFilter(\'' + c.key + '\')" class="text-[10px] px-2 py-1 rounded border font-semibold transition flex items-center gap-1" style="' + style + '">'
+                + c.label + '<small style="opacity:.65;font-weight:600">' + n + '</small></button>');
+        });
+        bar.innerHTML = htmlParts.join('');
+    }
+
+    function applyGridFilter() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const sug = aiSuggestions[tid] || {};
+        currentImg1VINs.forEach((v, idx) => {
+            const tile = document.getElementById('img1-tile-' + idx);
+            if (!tile) return;
+            let visible = true;
+            if (img1GridFilter !== 'all') {
+                const st = getImg1Review(tid, v.vin, v.rooftop || '') || 'pending';
+                if (img1GridFilter === 'uncat') {
+                    visible = (st === 'pending') && aiLastRunStats && !sug[aiVinKey(v)];
+                } else {
+                    visible = st === img1GridFilter;
+                }
+            }
+            tile.style.display = visible ? '' : 'none';
+        });
+    }
+
+    function setGridFilter(cls) {
+        img1GridFilter = cls;
+        applyGridFilter();
+        renderGridFilterChips();
+    }
+
     // ── Keyboard cheatsheet modal ─────────────────────────────────────────
     function aiOpenCheatsheet()  { document.getElementById('ai-cheatsheet-modal').classList.add('active'); }
     function aiCloseCheatsheet() { document.getElementById('ai-cheatsheet-modal').classList.remove('active'); }
@@ -7393,6 +7471,7 @@
             if (currentImg1Idx >= 0) svPreloadAhead(currentImg1Idx, 8);
         }
         try { aiUpdateFab(); } catch (_) {}
+        try { renderGridFilterChips(); applyGridFilter(); } catch (_) {}
     }
 
     // render1ImgImagePane is kept for sidebar-click to highlight the selected VIN
@@ -7433,6 +7512,8 @@
         // Short-code state badge (top-left)
         const stBadge = tile.querySelector('.img1-state-badge') || tile.children[1];
         applyStateBadge(stBadge, st);
+        // Keep filter chips + tile visibility in sync after any state change
+        try { renderGridFilterChips(); applyGridFilter(); } catch (_) {}
     }
 
     function submit1ImgReview(idx, status) {
