@@ -5492,7 +5492,7 @@
         if (subtitleEl) {
             const parts = ['<b>' + suggestedTotal + '</b> suggestion' + (suggestedTotal === 1 ? '' : 's') + ' across OK, Raw, Stock, Hero Angle, Photo NA'];
             if (uncatCount) parts.push('<b>' + uncatCount + '</b> uncategorized VIN' + (uncatCount === 1 ? '' : 's') + ' pending manual review');
-            subtitleEl.innerHTML = parts.join(' · ') + '. Accept per class, click a tile to override, or dismiss and keep working manually.';
+            subtitleEl.innerHTML = parts.join(' · ') + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
         }
         const claudeBanner = aiLastClaudeStats
             ? '<div class="mb-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-1.5"><b>✨ Claude pass:</b> ' + aiLastClaudeStats.kept + ' kept · ' + aiLastClaudeStats.dropped + ' dropped as false-positive · ' + aiLastClaudeStats.errored + ' errored (of ' + aiLastClaudeStats.total + ')</div>'
@@ -5547,11 +5547,11 @@
                         + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(100,116,139,.78)">' + vinShort + ' · pending</div>'
                         + '</div>';
                 }
-                const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%'];
+                const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%', 'click = reject (move to Uncategorized)'];
                 if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
                 // Shared tile-overlay contract: ✨ inlined into the bottom confidence
                 // overlay instead of competing with a top-corner badge.
-                return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer" title="' + tipParts.join(' — ') + '" onclick="aiAcceptOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
+                return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer hover:ring-2 hover:ring-rose-400 transition" title="' + tipParts.join(' — ') + '" onclick="aiRejectOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
                     + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
                     + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.claudeVerified ? '✨ ' : '') + (item.conf * 100).toFixed(0) + '%</div>'
                     + '</div>';
@@ -5623,6 +5623,17 @@
         try { updateTileIssueState(info.idx, info.cls); } catch (_) {}
         delete aiSuggestions[tid][vinKey];
         try { updateImg1ProgressBadge(); } catch (_) {}
+        aiOpenReportModal();
+    }
+
+    // Reject this suggestion: remove it from aiSuggestions so the VIN surfaces
+    // in the Uncategorized bucket for manual review. Does NOT write a state —
+    // the reviewer picks the correct class themselves.
+    function aiRejectOne(vinKey) {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        if (aiSuggestions[tid]) delete aiSuggestions[tid][vinKey];
+        try { render1ImgGallery(); } catch (_) {}
         aiOpenReportModal();
     }
 
