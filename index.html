@@ -666,6 +666,10 @@
                 <div class="relative">
                     <input id="vin-search" type="text" placeholder="Search VIN..." class="pl-3 pr-8 py-1.5 border border-slate-200 rounded-lg text-[12px] w-44 focus:ring-1 focus:ring-blue-500 outline-none transition">
                 </div>
+                <button onclick="aiOpenCountsModal()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1.5 rounded text-[11px] font-bold flex items-center space-x-1.5 border border-slate-200" title="Review category counts">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
+                    <span>Counts</span>
+                </button>
                 <button id="summary-btn" class="bg-blue-600 text-white px-3 py-1.5 rounded text-[11px] font-bold hover:bg-blue-700 flex items-center space-x-1.5">
                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
                     <span>Summary</span>
@@ -1104,6 +1108,47 @@
                 <button onclick="aiCancelAnalysis()" class="text-rose-600 hover:text-rose-700 font-semibold">Cancel</button>
             </div>
         </div>
+    </div>
+</div>
+
+<div id="ai-uncat-modal" class="modal-overlay">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-7xl h-[92vh] flex flex-col">
+        <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <div>
+                <h3 class="font-bold text-slate-800 text-[17px]">Review uncategorized VINs</h3>
+                <p class="text-[12px] text-slate-500 mt-0.5">Click a tile to focus it, then use the keyboard shortcuts to mark it. Re-press the same shortcut to clear.</p>
+                <p class="text-[11px] text-slate-400 mt-1">
+                    <b>space/o</b> OK · <b>r</b> Raw · <b>s</b> Stock · <b>i</b> Bad Input · <b>b</b> Banner · <b>g</b> Background ·
+                    <b>q</b> Quality · <b>h</b> Hero Angle · <b>p</b> Photo NA · <b>u</b> Unsupported · <b>e</b> Error · <b>←/→</b> Prev/Next
+                </p>
+            </div>
+            <div class="flex items-center gap-3 text-[12px]">
+                <div class="text-slate-500"><b id="ai-uncat-remaining" class="text-slate-800">0</b> remaining · <b id="ai-uncat-reviewed" class="text-slate-800">0</b> reviewed in this pass</div>
+                <button onclick="aiCloseUncatModal()" class="text-slate-400 hover:text-slate-600 p-1">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
+            </div>
+        </div>
+        <div id="ai-uncat-grid" class="flex-1 overflow-y-auto p-4 grid grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2"></div>
+        <div class="px-6 py-3 border-t border-slate-100 flex items-center justify-between">
+            <div class="text-[11px] text-slate-400">Tiles you don't touch stay pending — Submit returns you to the full grid.</div>
+            <div class="flex gap-2">
+                <button onclick="aiCloseUncatModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Cancel</button>
+                <button onclick="aiSubmitUncat()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-5 py-2 rounded-lg text-[13px]">Submit review ✓</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="ai-counts-modal" class="modal-overlay" onclick="if(event.target===this)aiCloseCountsModal()">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg">
+        <div class="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+            <h3 class="font-bold text-slate-800 text-[17px]">Review counts</h3>
+            <button onclick="aiCloseCountsModal()" class="text-slate-400 hover:text-slate-600 p-1">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div id="ai-counts-body" class="p-6"></div>
     </div>
 </div>
 
@@ -5694,6 +5739,170 @@
         ['ok', ...AI_FOCUS_CLASSES].forEach(c => aiAcceptClass(c));
         aiCloseReportModal();
         try { render1ImgGallery(); } catch (_) {}
+        // After accepting, open the Uncategorized review modal so the reviewer
+        // can finish the ones the AI couldn't call confidently.
+        if (currentImg1Team && aiUncategorizedCount() > 0) aiOpenUncatModal();
+    }
+
+    // ── Uncategorized review modal ────────────────────────────────────────
+    let   aiUncatOpen        = false;
+    let   aiUncatFocusedIdx  = -1;
+    let   aiUncatReviewedSet = new Set();  // VINs touched in this review pass
+
+    function aiUncategorizedCount() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return 0;
+        let n = 0;
+        (currentImg1VINs || []).forEach(v => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (!st || st === 'pending') n++;
+        });
+        return n;
+    }
+
+    function aiOpenUncatModal() {
+        aiUncatOpen = true;
+        aiUncatFocusedIdx = -1;
+        aiUncatReviewedSet = new Set();
+        aiRenderUncatGrid();
+        document.getElementById('ai-uncat-modal').classList.add('active');
+    }
+
+    function aiCloseUncatModal() {
+        aiUncatOpen = false;
+        document.getElementById('ai-uncat-modal').classList.remove('active');
+        try { render1ImgGallery(); } catch (_) {}
+    }
+
+    function aiSubmitUncat() {
+        aiCloseUncatModal();
+    }
+
+    function aiRenderUncatGrid() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const uncat = [];
+        (currentImg1VINs || []).forEach((v, idx) => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '');
+            if (!st || st === 'pending') uncat.push({ v, idx });
+        });
+        document.getElementById('ai-uncat-remaining').textContent = uncat.length;
+        document.getElementById('ai-uncat-reviewed').textContent  = aiUncatReviewedSet.size;
+        const grid = document.getElementById('ai-uncat-grid');
+        if (!uncat.length) {
+            grid.innerHTML = '<div class="col-span-full text-center text-slate-400 py-16 text-sm">All uncategorized VINs have been reviewed. Click Submit to return to the full grid.</div>';
+            return;
+        }
+        grid.innerHTML = uncat.map(({ v, idx }) => {
+            const url = (v.urls && v.urls[0]) || '';
+            const vinShort = (v.vin || '').slice(-8);
+            const focused = idx === aiUncatFocusedIdx;
+            const focusStyle = focused ? 'outline:3px solid #4f46e5;outline-offset:-3px;' : 'outline:1px solid #e2e8f0;';
+            return '<div class="relative rounded overflow-hidden cursor-pointer bg-slate-50" style="aspect-ratio:4/3;' + focusStyle + '" onclick="aiFocusUncat(' + idx + ')" title="' + (v.vin || '') + '">'
+                + (url ? '<img src="' + url + '" style="width:100%;height:100%;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
+                       : '<div class="w-full h-full flex items-center justify-center text-[10px] text-slate-400">No image</div>')
+                + '<div class="absolute bottom-0 left-0 right-0 text-[10px] text-white px-1 py-0.5 truncate" style="background:rgba(15,23,42,.75)">' + vinShort + '</div>'
+                + '</div>';
+        }).join('');
+    }
+
+    function aiFocusUncat(idx) {
+        aiUncatFocusedIdx = idx;
+        aiRenderUncatGrid();
+    }
+
+    const AI_UNCAT_SHORTCUTS = {
+        'r': 'raw', 's': 'stock', 'i': 'issue', 'b': 'banner', 'g': 'background',
+        'q': 'quality', 'h': 'hero', 'p': 'photo_na', 'u': 'unsupported', 'e': 'sequence',
+        'o': 'ok', ' ': 'ok'
+    };
+
+    document.addEventListener('keydown', function (e) {
+        if (!aiUncatOpen) return;
+        const target = e.target;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+
+        // Navigation
+        if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
+            e.preventDefault();
+            e.stopPropagation();
+            const tid = currentImg1Team?.teamId;
+            if (!tid) return;
+            const uncatIdxs = [];
+            (currentImg1VINs || []).forEach((v, i) => {
+                const st = getImg1Review(tid, v.vin, v.rooftop || '');
+                if (!st || st === 'pending') uncatIdxs.push(i);
+            });
+            if (!uncatIdxs.length) return;
+            const curPos = uncatIdxs.indexOf(aiUncatFocusedIdx);
+            const nextPos = e.key === 'ArrowRight'
+                ? (curPos < 0 ? 0 : Math.min(curPos + 1, uncatIdxs.length - 1))
+                : (curPos < 0 ? 0 : Math.max(curPos - 1, 0));
+            aiUncatFocusedIdx = uncatIdxs[nextPos];
+            aiRenderUncatGrid();
+            return;
+        }
+
+        // Marking
+        const key = e.key.toLowerCase();
+        const status = AI_UNCAT_SHORTCUTS[key];
+        if (!status) return;
+        if (aiUncatFocusedIdx < 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const v = currentImg1VINs[aiUncatFocusedIdx];
+        if (!v) return;
+        const curSt = getImg1Review(tid, v.vin, v.rooftop || '');
+        const newSt = curSt === status ? null : status;
+        setImg1ReviewForIdx(aiUncatFocusedIdx, newSt);
+        try { updateTileIssueState(aiUncatFocusedIdx, newSt); } catch (_) {}
+        try { updateImg1ProgressBadge(); } catch (_) {}
+        aiUncatReviewedSet.add(aiUncatFocusedIdx);
+        aiRenderUncatGrid();
+    }, true);
+
+    // ── Counts modal ──────────────────────────────────────────────────────
+    function aiOpenCountsModal() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const counts = { ok:0, raw:0, stock:0, hero:0, photo_na:0, issue:0, banner:0, background:0, quality:0, unsupported:0, sequence:0, pending:0 };
+        (currentImg1VINs || []).forEach(v => {
+            const st = getImg1Review(tid, v.vin, v.rooftop || '') || 'pending';
+            counts[st] = (counts[st] || 0) + 1;
+        });
+        const total = (currentImg1VINs || []).length;
+        const row = (cls, label) => {
+            const n = counts[cls] || 0;
+            const pct = total ? ((n / total) * 100).toFixed(1) : '0.0';
+            const color = cls === 'pending' ? '#f59e0b' : (stateColor(cls) || '#64748b');
+            return '<div class="flex items-center gap-3 py-1.5 border-b border-slate-100 text-[13px]">'
+                + '<span style="width:12px;height:12px;border-radius:3px;background:' + color + ';display:inline-block;flex-shrink:0"></span>'
+                + '<span class="flex-1 text-slate-700">' + label + '</span>'
+                + '<b class="text-slate-900 w-10 text-right">' + n + '</b>'
+                + '<span class="text-slate-400 w-14 text-right text-[11px]">' + pct + '%</span>'
+                + '</div>';
+        };
+        const body = document.getElementById('ai-counts-body');
+        body.innerHTML =
+            row('ok', 'OK')
+            + row('raw', 'Raw')
+            + row('stock', 'Stock')
+            + row('hero', 'Hero Angle')
+            + row('photo_na', 'Photo NA')
+            + row('issue', 'Bad Input')
+            + row('banner', 'Banner')
+            + row('background', 'Background')
+            + row('quality', 'Quality')
+            + row('unsupported', 'Unsupported Vehicle')
+            + row('sequence', 'Error')
+            + row('pending', 'Pending / uncategorized')
+            + '<div class="mt-3 pt-3 border-t border-slate-200 flex items-center justify-between text-[13px]"><span class="text-slate-500">Total VINs</span><b class="text-slate-900">' + total + '</b></div>';
+        document.getElementById('ai-counts-modal').classList.add('active');
+    }
+    function aiCloseCountsModal() {
+        document.getElementById('ai-counts-modal').classList.remove('active');
     }
 
     function aiOverlaySuggestion(tile, v) {
@@ -7618,6 +7827,7 @@
                 'e':'sequence','E':'sequence'
             };
             if (img1IssueShortcuts[e.key] && currentImg1Idx >= 0) {
+                if (aiUncatOpen) return;  // uncat modal has its own handler
                 e.preventDefault();
                 svToggleIssue(img1IssueShortcuts[e.key]);
                 return;
