@@ -455,7 +455,7 @@
                 </div>
 
                 <!-- Category filter chips — show only tiles matching the chosen state -->
-                <div id="grid-filter-bar" class="hidden items-center flex-wrap gap-1 bg-slate-50 px-6 py-2 border-b border-slate-100 flex-shrink-0"></div>
+                <div id="grid-filter-bar" class="hidden flex-wrap items-center gap-1 bg-slate-50 px-6 py-2 border-b border-slate-100 flex-shrink-0" style="display:none"></div>
 
                 <!-- Selection toolbar (1st-image multi-select) — lives in the top bar so it stays visible when the left panel is hidden -->
                 <div id="grid-select-bar" class="hidden items-center flex-wrap gap-1 bg-white px-6 py-2 border-b border-slate-100 flex-shrink-0">
@@ -5752,8 +5752,7 @@
         const bar = document.getElementById('grid-filter-bar');
         if (!bar) return;
         const tid = currentImg1Team?.teamId;
-        if (!tid || !currentImg1VINs?.length) { bar.classList.add('hidden'); return; }
-        bar.classList.remove('hidden');
+        if (!tid || !currentImg1VINs?.length) { bar.style.display = 'none'; return; }
 
         const counts = { all: currentImg1VINs.length, pending: 0, uncat: 0 };
         const sug = aiSuggestions[tid] || {};
@@ -5788,10 +5787,11 @@
             const style = active
                 ? 'background:' + c.color + ';color:#fff;border-color:' + c.color
                 : 'background:#fff;color:' + c.color + ';border-color:' + c.color + '55';
-            htmlParts.push('<button type="button" onclick="setGridFilter(\'' + c.key + '\')" class="text-[10px] px-2 py-1 rounded border font-semibold transition flex items-center gap-1" style="' + style + '">'
+            htmlParts.push('<button type="button" onclick="setGridFilter(\'' + c.key + '\')" class="text-[10px] px-2 py-1 rounded border font-semibold transition inline-flex items-center gap-1 whitespace-nowrap" style="' + style + '">'
                 + c.label + '<small style="opacity:.65;font-weight:600">' + n + '</small></button>');
         });
         bar.innerHTML = htmlParts.join('');
+        bar.style.display = 'flex';   // override the inline display:none initial state
     }
 
     function applyGridFilter() {
