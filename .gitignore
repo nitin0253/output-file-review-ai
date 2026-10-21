@@ -1,7 +1,6 @@
 node_modules/
-styles.css
-styles.css.map
 _site/
 dist/
 .DS_Store
 .env
+# styles.css is committed (built by `npm run build` before each push)
