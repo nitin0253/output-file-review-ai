@@ -899,7 +899,6 @@
         <div class="px-6 py-3 border-t border-slate-100 flex justify-between items-center">
             <button onclick="aiOpenPromptModal()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
             <div class="flex gap-2">
-                <button onclick="aiRunClaudeVerify()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold px-4 py-2 rounded-lg text-[13px] border border-indigo-200" title="Re-check Hero Angle suggestions with Claude Vision">✨ Verify Hero Angle with Claude</button>
                 <button onclick="aiCloseReportModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Dismiss</button>
                 <button onclick="aiAcceptAll()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg text-[13px]">Accept all</button>
             </div>
@@ -1077,6 +1076,10 @@
     function storageKey()     { return 'spyne_reviews_v2_' + (getCurrentUser() || 'anon'); }
     function storageKey1Img() { return 'spyne_1img_v2_'   + (getCurrentUser() || 'anon'); }
     function storageKey1ImgDone() { return 'spyne_1img_done_' + (getCurrentUser() || 'anon'); }
+
+    // One-time cleanup: Claude Vision verify was removed, so purge any API key
+    // previously pasted into localStorage so it can't leak from an old session.
+    try { localStorage.removeItem('spyne_ai_claude_key'); } catch (_) {}
     function storageKey1ImgZoom() { return 'spyne_1img_zoom_' + (getCurrentUser() || 'anon'); }
     function storageKeyLastRooftop() { return 'spyne_last_rooftop_' + (getCurrentUser() || 'anon'); }
 
@@ -4962,9 +4965,6 @@
     // that adds the header. '' disables the proxy (direct fetch). For scale
     // or privacy, deploy your own Cloudflare Worker and swap the URL below.
     const AI_IMAGE_PROXY   = 'https://spyne-img-proxy.nitin-kumar.workers.dev/?url=';
-    const AI_CLAUDE_MODEL  = 'claude-haiku-5-5';
-    const AI_CLAUDE_KEY_LS = 'spyne_ai_claude_key';
-    const AI_CLAUDE_HERO_PROMPT = 'You are reviewing the FIRST image a car dealer uploaded for a used-vehicle listing. "Wrong Hero Angle" means the image is NOT a proper hero shot — i.e. it shows the rear, side detail, interior, dashboard, odometer, close-up, badge, wheel, mirror, or any view other than a clear front or front-three-quarter shot of the entire car.\n\nIs this image a WRONG hero angle?\n\nRespond on exactly two lines:\nVERDICT: YES or NO\nREASON: 2-5 words';
     let   aiExtractor        = null;
     let   aiExtractorPromise = null;
     const aiEmbedCache       = new Map();
@@ -4972,7 +4972,6 @@
     const aiAutoOpenedTeams  = new Set();
     let   aiRunToken         = 0;
     let   aiLastRunStats     = null;
-    let   aiLastClaudeStats  = null;
     const img1BrokenImgIndices = new Set();  // VIN indices whose first-image tile could not display
     const aiCollapsedSections  = new Set();  // report sections collapsed by the reviewer
 
@@ -5496,13 +5495,10 @@
             if (uncatCount) parts.push('<b>' + uncatCount + '</b> uncategorized VIN' + (uncatCount === 1 ? '' : 's') + ' pending manual review');
             subtitleEl.innerHTML = parts.join(' · ') + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
         }
-        const claudeBanner = aiLastClaudeStats
-            ? '<div class="mb-2 text-[11px] text-indigo-700 bg-indigo-50 border border-indigo-200 rounded px-3 py-1.5"><b>✨ Claude pass:</b> ' + aiLastClaudeStats.kept + ' kept · ' + aiLastClaudeStats.dropped + ' dropped as false-positive · ' + aiLastClaudeStats.errored + ' errored (of ' + aiLastClaudeStats.total + ')</div>'
-            : '';
         const colorFor = (c) => c === 'uncategorized' ? '#64748b' : stateColor(c);
         const labelFor = (c) => c === 'uncategorized' ? 'Uncategorized' : stateLabel(c);
 
-        document.getElementById('ai-report-tiles').innerHTML = claudeBanner +
+        document.getElementById('ai-report-tiles').innerHTML =
             '<div class="grid grid-cols-3 md:grid-cols-6 gap-2">' +
             allReportClasses.map(c => {
                 const n = bucket[c].length;
@@ -5550,12 +5546,9 @@
                         + '</div>';
                 }
                 const tipParts = [v?.vin || '', (item.conf * 100).toFixed(0) + '%', 'click = reject (move to Uncategorized)'];
-                if (item.claudeVerified) tipParts.push('Claude ✓ ' + (item.claudeReason || ''));
-                // Shared tile-overlay contract: ✨ inlined into the bottom confidence
-                // overlay instead of competing with a top-corner badge.
                 return '<div class="relative rounded border border-slate-200 overflow-hidden cursor-pointer hover:ring-2 hover:ring-rose-400 transition" title="' + tipParts.join(' — ') + '" onclick="aiRejectOne(\'' + item.vinKey.replace(/'/g, "\\'") + '\')">'
                     + '<img src="' + url + '" style="width:100%;height:80px;object-fit:cover;background:#f1f5f9" referrerpolicy="no-referrer" loading="lazy">'
-                    + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.claudeVerified ? '✨ ' : '') + (item.conf * 100).toFixed(0) + '%</div>'
+                    + '<div class="absolute bottom-0 left-0 right-0 text-[9px] text-white px-1 py-0.5" style="background:rgba(15,23,42,.72)">' + vinShort + ' · ' + (item.conf * 100).toFixed(0) + '%</div>'
                     + '</div>';
             }).join('');
             return '<div class="mb-5">' + header + '<div class="grid grid-cols-6 md:grid-cols-8 gap-2">' + items + '</div></div>';
@@ -5983,7 +5976,7 @@
             tile.style.outlineOffset = '-2px';
             const chip = document.createElement('div');
             chip.style.cssText = 'position:absolute;top:4px;right:4px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:700;color:#fff;background:' + stateColor(info.cls) + ';z-index:3;box-shadow:0 1px 2px rgba(0,0,0,.2)';
-            chip.textContent = (info.claudeVerified ? '✨ ' : '') + stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
+            chip.textContent = stateLabel(info.cls) + ' · ' + (info.conf * 100).toFixed(0) + '%';
             tile.appendChild(chip);
         } else if (aiLastRunStats) {
             // AI ran but didn't produce a suggestion for this VIN → uncategorized.
@@ -5996,139 +5989,6 @@
             chip.title = 'AI could not classify — manual review';
             tile.appendChild(chip);
         }
-    }
-    // ── Claude Vision fallback for Hero Angle ─────────────────────────────
-    function aiGetClaudeKey() {
-        try { return localStorage.getItem(AI_CLAUDE_KEY_LS) || ''; } catch (_) { return ''; }
-    }
-    function aiSetClaudeKey(k) {
-        try { localStorage.setItem(AI_CLAUDE_KEY_LS, k); } catch (_) {}
-    }
-    function aiEnsureClaudeKey() {
-        let k = aiGetClaudeKey();
-        if (!k) {
-            k = prompt('Paste your Claude API key (starts with sk-ant-).\n\nStored only in this browser\'s localStorage. Get a key at https://console.anthropic.com/settings/keys');
-            if (!k || !k.trim()) return '';
-            aiSetClaudeKey(k.trim());
-        }
-        return aiGetClaudeKey();
-    }
-
-    async function aiFetchImageBase64(url) {
-        const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
-        const r = await fetch(fetchUrl);
-        if (!r.ok) throw new Error('image fetch ' + r.status);
-        const blob = await r.blob();
-        const mt = blob.type && blob.type.startsWith('image/') ? blob.type : 'image/jpeg';
-        const buf = await blob.arrayBuffer();
-        const bytes = new Uint8Array(buf);
-        let bin = '';
-        const CHUNK = 0x8000;
-        for (let i = 0; i < bytes.length; i += CHUNK) {
-            bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-        }
-        return { base64: btoa(bin), media_type: mt };
-    }
-
-    async function aiClaudeHeroAngleCheck(url, apiKey) {
-        const img = await aiFetchImageBase64(url);
-        const body = {
-            model: AI_CLAUDE_MODEL,
-            max_tokens: 80,
-            messages: [{
-                role: 'user',
-                content: [
-                    { type: 'image', source: { type: 'base64', media_type: img.media_type, data: img.base64 } },
-                    { type: 'text', text: AI_CLAUDE_HERO_PROMPT }
-                ]
-            }]
-        };
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-                'content-type': 'application/json',
-                'x-api-key': apiKey,
-                'anthropic-version': '2023-06-01',
-                'anthropic-dangerous-direct-browser-access': 'true'
-            },
-            body: JSON.stringify(body)
-        });
-        if (!resp.ok) {
-            const errTxt = await resp.text().catch(() => '');
-            throw new Error('Claude ' + resp.status + ': ' + errTxt.slice(0, 200));
-        }
-        const data = await resp.json();
-        const text = (data?.content?.[0]?.text || '').trim();
-        const vm = text.match(/VERDICT:\s*(YES|NO)/i);
-        const rm = text.match(/REASON:\s*(.+)/i);
-        return {
-            verdict: vm ? vm[1].toUpperCase() : 'UNKNOWN',
-            reason:  rm ? rm[1].trim().slice(0, 40) : '',
-        };
-    }
-
-    async function aiRunClaudeVerify() {
-        const tid = currentImg1Team?.teamId;
-        if (!tid) return;
-        const bucket = aiReportBucket();
-        const candidates = (bucket.hero || []).filter(x => !x.claudeVerified);
-        if (!candidates.length) {
-            alert('No unverified Hero Angle suggestions to check.\n\nIf there are none in the report, run the main AI analysis first.');
-            return;
-        }
-        const key = aiEnsureClaudeKey();
-        if (!key) return;
-        const myToken = ++aiRunToken;
-        if (aiRunInFlight) return;
-        aiRunInFlight = true;
-        const progFill  = document.getElementById('ai-progress-fill');
-        const progMsg   = document.getElementById('ai-progress-msg');
-        const progCount = document.getElementById('ai-progress-count');
-        aiCloseReportModal();
-        aiShowProgressPill();
-        progFill.style.width = '0%';
-        progMsg.textContent = 'Verifying Hero Angle with Claude Vision…';
-        progCount.textContent = '0/' + candidates.length;
-        let done = 0, kept = 0, dropped = 0, errored = 0;
-        for (const item of candidates) {
-            if (myToken !== aiRunToken) return;
-            const v = currentImg1VINs[item.idx];
-            const url = v?.urls?.[0];
-            if (!url) { errored++; done++; continue; }
-            try {
-                const r = await aiClaudeHeroAngleCheck(url, key);
-                const sug = aiSuggestions[tid]?.[item.vinKey];
-                if (sug) {
-                    if (r.verdict === 'YES') {
-                        sug.claudeVerified = true;
-                        sug.claudeReason = r.reason;
-                        kept++;
-                    } else if (r.verdict === 'NO') {
-                        delete aiSuggestions[tid][item.vinKey];
-                        dropped++;
-                    } else {
-                        errored++;
-                    }
-                }
-            } catch (err) {
-                console.error('[AI classifier] Claude verify failed for', url, err);
-                errored++;
-                if (String(err.message || err).includes('401')) {
-                    aiSetClaudeKey('');
-                    alert('Claude API returned 401 Unauthorized. The key was cleared — click Verify again to re-enter it.');
-                    break;
-                }
-            }
-            done++;
-            progFill.style.width = (100 * done / candidates.length) + '%';
-            progCount.textContent = done + '/' + candidates.length;
-        }
-        aiLastClaudeStats = { kept, dropped, errored, total: candidates.length };
-        console.log('[AI classifier] Claude verify stats', aiLastClaudeStats);
-        aiRunInFlight = false;
-        aiHideProgressPill();
-        try { render1ImgGallery(); } catch (_) {}
-        aiOpenReportModal();
     }
     // ───────────────────────── end AI classifier ─────────────────────────
 
