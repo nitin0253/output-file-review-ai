@@ -617,23 +617,18 @@
                 </div>
                 <!-- Enterprise metadata (from spyne_rooftop_enterprises, joined on team_id) -->
                 <div id="enterprise-meta" class="hidden items-center flex-wrap gap-1.5"></div>
-                <!-- Progress summary bar — 1st image mode -->
-                <div id="img1-progress-bar" class="hidden items-center space-x-1 flex-wrap gap-y-1">
-                    <span id="pg-reviewed" class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 text-slate-600"></span>
-                    <span class="text-slate-300 text-[10px]">|</span>
-                    <span id="pg-ok"        class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-100 text-emerald-700 hidden"></span>
-                    <span id="pg-raw"       class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-orange-100 text-orange-700 hidden"></span>
-                    <span id="pg-stock"     class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-blue-100 text-blue-700 hidden"></span>
-                    <span id="pg-internal"  class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-purple-100 text-purple-700 hidden"></span>
-                    <span class="text-slate-300 text-[10px]" id="pg-sub-sep" style="display:none">|</span>
-                    <span id="pg-banner"    class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-700 text-white hidden"></span>
-                    <span id="pg-bg"        class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-700 text-white hidden"></span>
-                    <span id="pg-quality"   class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-700 text-white hidden"></span>
-                    <span id="pg-hero"      class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-700 text-white hidden"></span>
-                    <span id="pg-photo"     class="px-2 py-0.5 rounded-full text-[11px] font-semibold text-white hidden" style="background:#94a3b8"></span>
-                    <span id="pg-unsupported" class="px-2 py-0.5 rounded-full text-[11px] font-semibold bg-red-100 text-red-700 hidden"></span>
-                    <span id="pg-sequence"  class="px-2 py-0.5 rounded-full text-[11px] font-semibold text-white hidden" style="background:#0891b2"></span>
-<!-- pg-pending removed: redundant with reviewed count -->
+                <!-- Progress summary — collapsed to one button + popover for the per-class breakdown -->
+                <div id="img1-progress-bar" class="hidden items-center relative">
+                    <button id="pg-summary-btn" type="button" onclick="togglePgPopover(event)" title="Click for per-class breakdown"
+                        class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:border-slate-300 text-slate-700 text-[12px] font-semibold transition">
+                        <svg class="w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2z"/></svg>
+                        <span id="pg-summary-text">0 / 0</span>
+                        <span id="pg-family-dots" class="flex items-center gap-0.5"></span>
+                        <svg class="w-3 h-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 9l-7 7-7-7"/></svg>
+                    </button>
+                    <div id="pg-popover" class="hidden absolute top-full left-0 mt-2 w-72 bg-white border border-slate-200 rounded-xl shadow-lg z-[80] p-3">
+                        <div id="pg-popover-body" class="space-y-3"></div>
+                    </div>
                 </div>
                 <!-- Normal progress pill — non-1img modes -->
                 <span id="review-progress" class="bg-blue-50 text-blue-700 px-2.5 py-0.5 rounded-full text-[11px] font-semibold"></span>
@@ -7130,61 +7125,97 @@
         grid.className = 'hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3';
     }
 
+    // Semantic family groupings for the progress popover.
+    // ok      → tile already shippable
+    // fixable → image needs post-processing (studio reshoot / angle / crop)
+    // unusable→ cannot be fixed in post, blocks the listing
+    const PG_FAMILIES = [
+        { key:'ok',       label:'Shippable', color:'#10b981', states:['ok'] },
+        { key:'fixable',  label:'Fixable in post', color:'#f97316',
+          states:['raw','stock','hero','quality','background','banner'] },
+        { key:'unusable', label:'Unusable upload', color:'#dc2626',
+          states:['photo_na','unsupported','issue','sequence'] },
+    ];
+    const PG_STATE_LABELS = { ok:'OK', raw:'Raw', stock:'Stock', hero:'Hero Angle',
+        quality:'Quality', background:'Background', banner:'Banner',
+        photo_na:'Photo NA', unsupported:'Unsupported Vehicle', issue:'Bad Input', sequence:'Error' };
+
     function updateImg1ProgressBadge() {
         const teamId = currentImg1Team?.teamId;
         const total  = currentImg1VINs.length;
-        let ok = 0, raw = 0, stock = 0, internal = 0, pending = 0;
-        let banner = 0, bg = 0, quality = 0, hero = 0, photo_na_count = 0, unsupported_count = 0, sequence_count = 0;
-
-        currentImg1VINs.forEach((v, idx) => {
-            const st = getImg1Review(teamId, v.vin, idx);  // uses img1ReviewKey internally
-            if      (st === 'ok')         ok++;
-            else if (st === 'raw')        raw++;
-            else if (st === 'stock')      stock++;
-            else if (st === 'issue')      internal++;
-            else if (st === 'banner')     banner++;
-            else if (st === 'background') bg++;
-            else if (st === 'quality')    quality++;
-            else if (st === 'hero')       hero++;
-            else if (st === 'photo_na')   photo_na_count++;
-            else if (st === 'unsupported') unsupported_count++;
-            else if (st === 'sequence')   sequence_count++;
-            else                          pending++;
+        const counts = { ok:0, raw:0, stock:0, hero:0, quality:0, background:0, banner:0,
+                         photo_na:0, unsupported:0, issue:0, sequence:0, pending:0 };
+        currentImg1VINs.forEach((v) => {
+            const st = getImg1Review(teamId, v.vin, v.rooftop || '') || 'pending';
+            if (counts[st] !== undefined) counts[st]++;
         });
-        const done = ok + raw + stock + internal + banner + bg + quality + hero + photo_na_count + unsupported_count + sequence_count;
+        const done = total - counts.pending;
 
-        document.getElementById('review-progress').innerText = done + ' / ' + total + ' reviewed';
+        const rp = document.getElementById('review-progress');
+        if (rp) rp.innerText = done + ' / ' + total + ' reviewed';
 
         const bar = document.getElementById('img1-progress-bar');
         if (!bar) return;
 
-        const setpill = (id, count, label) => {
-            const el = document.getElementById(id);
-            if (!el) return;
-            if (count > 0) { el.textContent = label + ': ' + count; el.classList.remove('hidden'); el.style.display = ''; }
-            else           { el.classList.add('hidden'); el.style.display = 'none'; }
-        };
+        // Summary button text
+        const sumText = document.getElementById('pg-summary-text');
+        if (sumText) sumText.textContent = done + ' / ' + total;
 
-        const rv = document.getElementById('pg-reviewed');
-        if (rv) { rv.textContent = done + '/' + total; rv.classList.remove('hidden'); }
+        // Family dots on the button (one dot per non-empty family)
+        const dots = document.getElementById('pg-family-dots');
+        if (dots) {
+            dots.innerHTML = PG_FAMILIES.map(f => {
+                const n = f.states.reduce((s, k) => s + (counts[k] || 0), 0);
+                if (!n) return '';
+                return '<span class="inline-flex items-center gap-0.5"><span style="width:7px;height:7px;border-radius:50%;background:' + f.color + ';display:inline-block"></span><span class="text-[10px] font-semibold" style="color:' + f.color + '">' + n + '</span></span>';
+            }).join('');
+        }
 
-        setpill('pg-ok',       ok,       '✓ OK');
-        setpill('pg-raw',      raw,      'Raw');
-        setpill('pg-stock',    stock,    'Stock');
-        setpill('pg-internal', internal, 'Bad Input');
-        setpill('pg-banner',   banner,   'Banner');
-        setpill('pg-bg',       bg,       'Background');
-        setpill('pg-quality',  quality,  'Quality');
-        setpill('pg-hero',     hero,     'Hero Angle');
-        setpill('pg-photo',    photo_na_count, 'Photo NA');
-        setpill('pg-unsupported', unsupported_count, 'Unsupported Vehicle');
-        setpill('pg-sequence', sequence_count, 'Error');
-        // pending pill removed
-
-        const anySub = banner + bg + quality + hero + photo_na_count > 0;
-        const sep = document.getElementById('pg-sub-sep');
-        if (sep) sep.style.display = anySub ? '' : 'none';
+        // Popover body: one section per non-empty family
+        const body = document.getElementById('pg-popover-body');
+        if (body) {
+            const sections = PG_FAMILIES.map(f => {
+                const items = f.states.filter(k => counts[k] > 0);
+                if (!items.length) return '';
+                const famTotal = f.states.reduce((s, k) => s + (counts[k] || 0), 0);
+                return '<div>'
+                    + '<div class="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider mb-1" style="color:' + f.color + '">'
+                    + '<span class="flex items-center gap-1.5"><span style="width:8px;height:8px;border-radius:50%;background:' + f.color + '"></span>' + f.label + '</span>'
+                    + '<span class="text-slate-700">' + famTotal + '</span></div>'
+                    + '<div class="space-y-0.5 pl-3.5">'
+                    + items.map(k => '<div class="flex items-center justify-between text-[11px]">'
+                        + '<span class="flex items-center gap-1.5"><span style="width:6px;height:6px;border-radius:50%;background:' + stateColor(k) + '"></span><span class="text-slate-600">' + PG_STATE_LABELS[k] + '</span></span>'
+                        + '<b class="text-slate-800">' + counts[k] + '</b></div>').join('')
+                    + '</div></div>';
+            }).filter(Boolean).join('');
+            const pendingRow = counts.pending > 0
+                ? '<div class="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px]">'
+                + '<span class="flex items-center gap-1.5"><span style="width:8px;height:8px;border-radius:50%;background:#94a3b8"></span><span class="text-slate-500 font-semibold uppercase tracking-wider text-[10px]">Pending</span></span>'
+                + '<b class="text-slate-700">' + counts.pending + '</b></div>'
+                : '';
+            body.innerHTML = sections + pendingRow || '<div class="text-center text-slate-400 text-[12px] py-4">No marks yet</div>';
+        }
     }
+
+    function togglePgPopover(e) {
+        if (e) e.stopPropagation();
+        const pop = document.getElementById('pg-popover');
+        if (!pop) return;
+        pop.classList.toggle('hidden');
+    }
+    document.addEventListener('click', function (e) {
+        const pop = document.getElementById('pg-popover');
+        const btn = document.getElementById('pg-summary-btn');
+        if (!pop || pop.classList.contains('hidden')) return;
+        if (e.target === btn || btn?.contains(e.target) || pop.contains(e.target)) return;
+        pop.classList.add('hidden');
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+            const pop = document.getElementById('pg-popover');
+            if (pop && !pop.classList.contains('hidden')) pop.classList.add('hidden');
+        }
+    });
 
     // Selection helpers (toggleVINSelect / selectAllVINs / clearVINSelection) call
     // render1ImgVinList() — it's the 1st-image VIN sidebar renderer.
