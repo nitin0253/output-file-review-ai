@@ -5363,10 +5363,34 @@
         return emb;
     }
 
-    async function aiEmbedFromRaw(rawImg, ex) {
+    async function aiEmbedOne(rawImg, ex) {
         const inputs = await ex.processor(rawImg);
         const out = await ex.model(inputs);
         return aiNormalizeEmbed(out.image_embeds.data);
+    }
+
+    // Multi-crop embedding: full image + center 60% (where the car sits) + top
+    // 25% strip (dealer logo + studio top). Centroids are composed from all three;
+    // the OK classifier compares each component independently so "same studio but
+    // wrong car angle" surfaces as Hero Angle instead of being swallowed into OK.
+    async function aiEmbedFromRaw(rawImg, ex) {
+        const w = rawImg.width, h = rawImg.height;
+        const full = await aiEmbedOne(rawImg, ex);
+        let center = null, top = null;
+        try {
+            const cx1 = Math.floor(w * 0.2), cy1 = Math.floor(h * 0.2);
+            const cx2 = Math.floor(w * 0.8), cy2 = Math.floor(h * 0.8);
+            if (cx2 - cx1 >= 32 && cy2 - cy1 >= 32) {
+                center = await aiEmbedOne(rawImg.crop([cx1, cy1, cx2, cy2]), ex);
+            }
+        } catch (_) {}
+        try {
+            const ty2 = Math.max(32, Math.floor(h * 0.25));
+            if (w >= 32 && ty2 >= 32) {
+                top = await aiEmbedOne(rawImg.crop([0, 0, w, ty2]), ex);
+            }
+        } catch (_) {}
+        return { full, center: center || full, top: top || full };
     }
 
     async function aiEmbed(url) {
@@ -5582,9 +5606,8 @@
             if (myToken !== aiRunToken) return;
 
             const centroids = {};
-            for (const cls of classesWithSamples) {
-                const vecs = vecsByClass[cls];
-                if (!vecs.length) continue;
+            const buildMean = (vecs) => {
+                if (!vecs.length) return null;
                 const dim = vecs[0].length;
                 const mean = new Float32Array(dim);
                 vecs.forEach(v => { for (let i = 0; i < dim; i++) mean[i] += v[i]; });
@@ -5592,7 +5615,17 @@
                 for (let i = 0; i < dim; i++) { mean[i] /= vecs.length; n += mean[i] * mean[i]; }
                 n = Math.sqrt(n) || 1;
                 for (let i = 0; i < dim; i++) mean[i] /= n;
-                centroids[cls] = mean;
+                return mean;
+            };
+            for (const cls of classesWithSamples) {
+                const vecs = vecsByClass[cls];
+                if (!vecs.length) continue;
+                // vecs is an array of {full, center, top} composite embeddings
+                centroids[cls] = {
+                    full:   buildMean(vecs.map(x => x.full)),
+                    center: buildMean(vecs.map(x => x.center)),
+                    top:    buildMean(vecs.map(x => x.top)),
+                };
             }
             stats.centroidsBuilt = Object.keys(centroids);
             // Per-class sample counts drive an adaptive margin: classes with 1-2
@@ -5640,13 +5673,41 @@
                         recordErr('pending', url, err);
                     } else if (emb) {
                         stats.pendingOk++;
+                        // Score each class by full-image similarity (the baseline signal)
                         let bestCls = null, bestSim = -1, secondSim = -1;
                         for (const cls of Object.keys(centroids)) {
-                            const s = aiCosine(emb, centroids[cls]);
+                            const s = aiCosine(emb.full, centroids[cls].full);
                             if (s > bestSim) { secondSim = bestSim; bestSim = s; bestCls = cls; }
                             else if (s > secondSim) { secondSim = s; }
                         }
                         if (bestSim > stats.maxSim) stats.maxSim = bestSim;
+
+                        // Multi-crop OK verification: if OK is a candidate and we have
+                        // OK centroids for center + top, confirm by center-crop (car
+                        // position) AND top-strip (studio/logo). Same studio but wrong
+                        // car region → re-route to Hero Angle candidate instead of OK.
+                        if (bestCls === 'ok' && centroids.ok) {
+                            const topSim    = aiCosine(emb.top,    centroids.ok.top);
+                            const centerSim = aiCosine(emb.center, centroids.ok.center);
+                            if (topSim >= 0.82 && centerSim < 0.72) {
+                                // Studio matches but the car region doesn't — hero angle wrong
+                                if (centroids.hero) {
+                                    bestCls = 'hero';
+                                    bestSim = Math.max(bestSim, topSim);
+                                    secondSim = Math.min(secondSim, bestSim - AI_MARGIN - 0.001);
+                                    stats.pendingOkRerouted = (stats.pendingOkRerouted || 0) + 1;
+                                } else {
+                                    // No Hero Angle samples to re-route into — skip OK.
+                                    bestCls = null;
+                                    stats.pendingBelowMargin++;
+                                }
+                            } else if (topSim < 0.78 || centerSim < 0.68) {
+                                // Studio doesn't match the OK fingerprint — don't claim OK.
+                                bestCls = null;
+                                stats.pendingBelowMargin++;
+                            }
+                        }
+
                         if (bestCls && (bestCls === 'ok' || AI_FOCUS_CLASSES.includes(bestCls))) {
                             const margin = bestSim - secondSim;
                             const k = sampleSizeByClass[bestCls] || 0;
