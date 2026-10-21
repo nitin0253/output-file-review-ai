@@ -5379,27 +5379,29 @@
                         }
                         if (bestSim > stats.maxSim) stats.maxSim = bestSim;
 
-                        // Multi-crop OK verification: if OK is a candidate and we have
-                        // OK centroids for center + top, confirm by center-crop (car
-                        // position) AND top-strip (studio/logo). Same studio but wrong
-                        // car region → re-route to Hero Angle candidate instead of OK.
+                        // Multi-crop OK verification (tightened): confirming OK now
+                        // requires BOTH top-strip and center-crop to match the OK
+                        // centroid tightly. Any looser match re-routes to Hero Angle
+                        // or drops to Uncategorized so false OK's don't slip through.
+                        //  - topSim    >= 0.75 AND centerSim <  0.78  → same-ish studio,
+                        //    car region doesn't match OK → Hero candidate.
+                        //  - topSim    <  0.72 OR  centerSim <  0.65  → doesn't look
+                        //    like this team's studio at all → drop to Uncategorized.
+                        //  - otherwise → confirm OK.
                         if (bestCls === 'ok' && centroids.ok) {
                             const topSim    = aiCosine(emb.top,    centroids.ok.top);
                             const centerSim = aiCosine(emb.center, centroids.ok.center);
-                            if (topSim >= 0.82 && centerSim < 0.72) {
-                                // Studio matches but the car region doesn't — hero angle wrong
+                            if (topSim >= 0.75 && centerSim < 0.78) {
                                 if (centroids.hero) {
                                     bestCls = 'hero';
                                     bestSim = Math.max(bestSim, topSim);
                                     secondSim = Math.min(secondSim, bestSim - AI_MARGIN - 0.001);
                                     stats.pendingOkRerouted = (stats.pendingOkRerouted || 0) + 1;
                                 } else {
-                                    // No Hero Angle samples to re-route into — skip OK.
                                     bestCls = null;
                                     stats.pendingBelowMargin++;
                                 }
-                            } else if (topSim < 0.78 || centerSim < 0.68) {
-                                // Studio doesn't match the OK fingerprint — don't claim OK.
+                            } else if (topSim < 0.72 || centerSim < 0.65) {
                                 bestCls = null;
                                 stats.pendingBelowMargin++;
                             }
