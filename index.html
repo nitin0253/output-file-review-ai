@@ -4969,6 +4969,14 @@
     // reflective dealer photos are the most common accuracy miss, so it gets a
     // stricter 80% bar — borderline cases fall into Uncategorized for human review.
     const AI_CLASS_THRESHOLD = { stock: 0.80 };
+    // Stock-CDN short-circuit: dealer stock-image CDNs (EVOX via
+    // service.secureoffersites.com, URL path FGetEvoxImage) hotlink-protect
+    // based on Referer + User-Agent AND fingerprint on Cloudflare's injected
+    // CF-Worker/Cdn-Loop headers, so neither direct fetch nor our Worker
+    // proxy can read them. A URL from one of these hosts is definitionally
+    // a stock image, so tag it Stock without a CLIP pass.
+    const STOCK_CDN_URL_RE = /^https?:\/\/[^\/]*secureoffersites\.com\/|FGetEvoxImage/i;
+    function isStockCdnUrl(u) { return !!u && STOCK_CDN_URL_RE.test(u); }
     const AI_FETCH_CONCURRENCY = 15; // parallel image fetches (CLIP embed stays serial)
     const AI_FETCH_RETRIES     = 2;  // retries on image fetch error (incl. proxy 5xx)
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
@@ -5361,6 +5369,7 @@
             // or all fallbacks errored) are tagged Photo NA directly, bypassing
             // CLIP. These are the "No image" tiles the reviewer treats as Photo NA.
             stats.pendingAutoPhotoNA = 0;
+            stats.pendingAutoStock   = 0;
             // Reset the suggestion bag so this run starts from a clean slate;
             // old suggestions from a previous run (including accepted ones)
             // are superseded by whatever this pass produces.
@@ -5372,6 +5381,9 @@
                 if (!firstUrl || img1BrokenImgIndices.has(i)) {
                     aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: i, autoBrokenImg: true };
                     stats.pendingAutoPhotoNA++;
+                } else if (isStockCdnUrl(firstUrl)) {
+                    aiSuggestions[tid][aiVinKey(v)] = { cls: 'stock', conf: 1.0, margin: 1.0, idx: i, autoStockCdn: true };
+                    stats.pendingAutoStock++;
                 } else {
                     pendingIdxs.push(i);
                 }
