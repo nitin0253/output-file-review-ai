@@ -937,7 +937,7 @@
         </div>
         <div id="ai-report-body" class="flex-1 overflow-y-auto px-6 py-4"></div>
         <div class="px-6 py-3 border-t border-slate-100 flex justify-between items-center">
-            <button onclick="aiOpenPromptModal()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
+            <button onclick="aiRerunWithCurrentSamples()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
             <div class="flex gap-2">
                 <button onclick="aiCloseReportModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Dismiss</button>
                 <button onclick="aiAcceptAll()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg text-[13px]">Accept all</button>
@@ -5290,6 +5290,22 @@
 
     function aiClosePromptModal() {
         document.getElementById('ai-prompt-modal').classList.remove('active');
+    }
+
+    // "Re-run with current samples" from the report footer: skip the prompt
+    // modal and kick off a fresh analysis immediately. Any newly tagged samples
+    // (added after the last run) are picked up by aiSampleUrlsByClass each
+    // call, so the new centroids reflect the updated sample set.
+    function aiRerunWithCurrentSamples() {
+        try { aiCloseReportModal(); } catch (_) {}
+        if (aiRunInFlight) return;        // a run is already in progress — ignore
+        if (!currentImg1Team) return;
+        if (!aiAnySampleTagged()) {
+            // No samples at all → fall back to the prompt so the user sees why.
+            aiOpenPromptModal();
+            return;
+        }
+        aiRunAnalysis();
     }
 
     let aiRunInFlight = false;
