@@ -4,6 +4,40 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spyne Image Review Dashboard — AI</title>
+    <script>
+        // Theme boot — runs before CSS parses to avoid a flash of the wrong theme.
+        // Reads saved preference, falls back to system; toggle below persists on click.
+        (function () {
+            try {
+                var saved = localStorage.getItem('ui_theme');
+                if (saved === 'dark' || saved === 'light') {
+                    document.documentElement.dataset.theme = saved;
+                }
+            } catch (_) {}
+            function wireToggle() {
+                var btn = document.getElementById('theme-toggle-btn');
+                if (!btn) return;
+                btn.addEventListener('click', function () {
+                    var root = document.documentElement;
+                    var cur  = root.dataset.theme;
+                    var sysDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                    var next;
+                    if (cur === 'dark') next = 'light';
+                    else if (cur === 'light') next = 'dark';
+                    else next = sysDark ? 'light' : 'dark';
+                    root.classList.add('theme-switching');
+                    root.dataset.theme = next;
+                    try { localStorage.setItem('ui_theme', next); } catch (_) {}
+                    setTimeout(function () { root.classList.remove('theme-switching'); }, 350);
+                });
+            }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', wireToggle);
+            } else {
+                wireToggle();
+            }
+        })();
+    </script>
     <link rel="stylesheet" href="styles.css">
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -25,6 +59,10 @@
             <button id="clear-cache-btn" style="display:none" class="items-center space-x-1.5 bg-white/10 hover:bg-rose-500/80 border border-white/20 px-3 py-1.5 rounded-md text-[11px] font-bold text-white transition active:scale-95 uppercase tracking-wider" title="Clear locally stored review progress for this device">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
                 <span>Clear Cache</span>
+            </button>
+            <button id="theme-toggle-btn" class="theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">
+                <svg class="moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+                <svg class="sun"  viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
             </button>
             <div id="user-info" class="hidden flex items-center space-x-2">
                 <div id="user-avatar" class="w-8 h-8 rounded-full bg-blue-800 flex items-center justify-center text-xs font-bold">?</div>
