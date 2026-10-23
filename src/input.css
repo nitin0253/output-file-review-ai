@@ -633,15 +633,16 @@ body {
 .issue-chip.checked .issue-kbd { background: var(--danger); color: #fff; border-color: transparent; }
 
 /* =========================================================================
- * Login page — scroll inside #page-login, sticky card head + floating CTA
+ * Login page — card scrolls inside #page-login, head sticks to card top,
+ * CTA is fixed to the viewport bottom so it floats regardless of card height.
  * ========================================================================= */
 #page-login.active {
     height: calc(100vh - 56px);
     max-height: calc(100vh - 56px);
     overflow-y: auto;
-    align-items: flex-start !important;
-    padding-top: 2.5rem;
-    padding-bottom: 2rem;
+    align-items: center !important;       /* keep card horizontally centered */
+    justify-content: flex-start !important;/* top of scroll area, not vertical center */
+    padding: 2.5rem 1rem 7.5rem;          /* bottom gutter for the floating CTA */
 }
 #login-card { position: relative; }
 .login-card-head {
@@ -654,20 +655,50 @@ body {
     box-shadow: 0 10px 20px -16px rgba(15,23,42,0.08);
 }
 #load-dealers-btn, #load-csv-btn, #load-drive-btn {
-    position: sticky; bottom: 12px; z-index: 10;
+    position: fixed; bottom: 20px;
+    left: 50%; transform: translateX(-50%);
+    width: min(calc(100% - 2rem), 28rem);
+    z-index: 60;
     background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #ec4899)) !important;
     color: #fff !important;
     border: 1px solid rgba(255,255,255,0.2);
-    box-shadow: var(--shadow-glow), 0 12px 28px -12px rgba(0,0,0,0.3);
+    box-shadow: var(--shadow-glow), 0 20px 40px -14px rgba(0,0,0,0.35);
     backdrop-filter: blur(10px);
     letter-spacing: 0.01em;
-    transition: transform var(--t), box-shadow var(--t);
+    transition: transform var(--t), box-shadow var(--t), background var(--t);
 }
 #load-dealers-btn:hover:not(:disabled),
 #load-csv-btn:hover:not(:disabled),
 #load-drive-btn:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: var(--shadow-glow), 0 18px 32px -12px rgba(0,0,0,0.35);
+    transform: translateX(-50%) translateY(-2px);
+    box-shadow: var(--shadow-glow), 0 26px 44px -14px rgba(0,0,0,0.4);
+}
+/* The hidden sibling panels' CTAs still have display:block from Tailwind's
+ * `block` default on <button>, so hide them explicitly when their panel is
+ * inactive, otherwise all three stack on top of each other at the viewport
+ * bottom whenever the login card is open. */
+#sheet-mode-panel.hidden #load-dealers-btn,
+#csv-mode-panel.hidden   #load-csv-btn,
+#drive-mode-panel.hidden #load-drive-btn { display: none; }
+
+/* =========================================================================
+ * AI run lock — kill pointer events on the gallery while classifier is running
+ * ========================================================================= */
+#images-grid.ai-locked,
+#img1-all-grid.ai-locked {
+    pointer-events: none;
+    filter: saturate(0.85) opacity(0.92);
+    transition: filter var(--t);
+}
+#images-grid.ai-locked::after,
+#img1-all-grid.ai-locked::after {
+    /* subtle shimmer stripe that reads as "the system is busy" */
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent 0%, var(--accent-soft) 50%, transparent 100%);
+    background-size: 200% 100%;
+    animation: shimmer 2.2s linear infinite;
+    pointer-events: none; opacity: .35;
 }
 
 /* =========================================================================

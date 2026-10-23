@@ -5272,6 +5272,11 @@
     }
 
     function aiOpenPromptModal() {
+        // If the report modal is open (e.g. user clicked "Re-run with current
+        // samples" from inside it), close it first so the prompt isn't stacked
+        // on top of a stale report — otherwise the report stays visible after
+        // the run starts and reads as "stuck".
+        try { aiCloseReportModal(); } catch (_) {}
         if (!currentImg1Team) return;
         const counts = aiSampleCountsByClass();
         const pending = aiPendingVINIndices().length;
@@ -5289,15 +5294,29 @@
 
     let aiRunInFlight = false;
 
+    function _aiLockGallery(lock) {
+        // Grid + All-view containers both need the lock — selection, tile clicks
+        // and keyboard tag shortcuts are blocked by applyImg1Issue's aiRunInFlight
+        // check, and this adds the visual lock + pointer-events kill so the
+        // reviewer can't fight the classifier.
+        ['images-grid', 'img1-all-grid'].forEach(id => {
+            const el = document.getElementById(id);
+            if (!el) return;
+            el.classList.toggle('ai-locked', !!lock);
+            if (lock) el.style.position = el.style.position || 'relative';
+        });
+    }
     function aiShowProgressPill()  {
         const pill = document.getElementById('ai-progress-pill');
         if (pill) pill.classList.remove('hidden');
         const fab = document.getElementById('ai-fab');
         if (fab) fab.classList.remove('visible');
+        _aiLockGallery(true);
     }
     function aiHideProgressPill() {
         const pill = document.getElementById('ai-progress-pill');
         if (pill) pill.classList.add('hidden');
+        _aiLockGallery(false);
         try { aiUpdateFab(); } catch (_) {}
     }
 
@@ -5315,6 +5334,7 @@
 
     async function aiRunAnalysis() {
         aiClosePromptModal();
+        try { aiCloseReportModal(); } catch (_) {}      // belt + braces: no stale report during a re-run
         const tid = currentImg1Team?.teamId;
         if (!tid) return;
         if (aiRunInFlight) return;                     // prevent re-trigger during run
