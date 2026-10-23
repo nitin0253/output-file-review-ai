@@ -1,0 +1,7 @@
+name = "spyne-img-proxy"
+main = "spyne-img-proxy.js"
+compatibility_date = "2026-10-23"
+account_id = "7f57207e90d8b479d1f944932dda3231"
+
+[observability]
+enabled = true
