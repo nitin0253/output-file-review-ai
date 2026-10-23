@@ -633,6 +633,97 @@ body {
 .issue-chip.checked .issue-kbd { background: var(--danger); color: #fff; border-color: transparent; }
 
 /* =========================================================================
+ * Login page — scroll inside #page-login, sticky card head + floating CTA
+ * ========================================================================= */
+#page-login.active {
+    height: calc(100vh - 56px);
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    align-items: flex-start !important;
+    padding-top: 2.5rem;
+    padding-bottom: 2rem;
+}
+#login-card { position: relative; }
+.login-card-head {
+    position: sticky; top: -2rem; z-index: 5;
+    background: var(--surface);
+    margin: -2rem -2rem 1rem;
+    padding: 1.25rem 2rem 1rem;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: 1px solid var(--border-soft);
+    box-shadow: 0 10px 20px -16px rgba(15,23,42,0.08);
+}
+#load-dealers-btn, #load-csv-btn, #load-drive-btn {
+    position: sticky; bottom: 12px; z-index: 10;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #ec4899)) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255,255,255,0.2);
+    box-shadow: var(--shadow-glow), 0 12px 28px -12px rgba(0,0,0,0.3);
+    backdrop-filter: blur(10px);
+    letter-spacing: 0.01em;
+    transition: transform var(--t), box-shadow var(--t);
+}
+#load-dealers-btn:hover:not(:disabled),
+#load-csv-btn:hover:not(:disabled),
+#load-drive-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-glow), 0 18px 32px -12px rgba(0,0,0,0.35);
+}
+
+/* =========================================================================
+ * Review workspace — warm up the content area so the theme reads everywhere
+ * ========================================================================= */
+#page-review {
+    background:
+      radial-gradient(1000px 500px at 85% -10%, var(--accent-soft), transparent 60%),
+      radial-gradient(900px 500px at -10% 30%, color-mix(in srgb, #ec4899 10%, transparent), transparent 55%),
+      var(--bg);
+}
+#page-dashboard {
+    background:
+      radial-gradient(1200px 600px at 100% -10%, var(--accent-soft), transparent 60%),
+      var(--bg) !important;
+}
+
+/* Review header + sidebar glass */
+#review-topbar, #review-header-bar, #main-content > header,
+#page-review > div > header, #page-review aside {
+    background: var(--surface-glass) !important;
+    backdrop-filter: var(--blur);
+    -webkit-backdrop-filter: var(--blur);
+}
+
+/* "IN REVIEW" pill + the OK button — brighter accent */
+#page-review .bg-amber-100 { background: color-mix(in srgb, var(--warn) 15%, transparent) !important; color: var(--warn) !important; border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+#page-review .text-amber-800 { color: var(--warn) !important; }
+#page-review .bg-green-50 { background: color-mix(in srgb, var(--success) 12%, transparent) !important; }
+#page-review .bg-green-500, #page-review .bg-emerald-500, #page-review .bg-emerald-600 {
+    background: linear-gradient(135deg, var(--success), color-mix(in srgb, var(--success) 70%, #0ea5e9)) !important;
+}
+#page-review .bg-blue-500, #page-review .bg-blue-600, #page-review .bg-indigo-600 {
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #ec4899)) !important;
+    color: #fff !important;
+}
+
+/* Done + Summary buttons (top-right of review) — gradient pills with glow */
+#done-review-btn, #open-counts-btn, #open-summary-btn {
+    box-shadow: 0 8px 20px -10px var(--accent-ring);
+    transition: transform var(--t), box-shadow var(--t);
+}
+#done-review-btn:hover, #open-counts-btn:hover, #open-summary-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-glow);
+}
+
+/* Enterprise / Ent-id / Team-id chips above review grid */
+.review-chip, [class*="rounded-md"].bg-slate-100, [class*="rounded"].bg-slate-50 {
+    border: 1px solid var(--border-soft);
+}
+
+/* The violet gradient on the AI progress bar glows */
+.ai-progress-bar { box-shadow: inset 0 1px 2px var(--border-soft); }
+
+/* =========================================================================
  * Theme toggle (sun/moon pill in topbar)
  * ========================================================================= */
 .theme-toggle {
