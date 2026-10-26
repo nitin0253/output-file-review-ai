@@ -821,11 +821,24 @@
                 <svg class="w-8 h-8" style="color:#4f46e5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
             </div>
             <h3 class="text-slate-800 font-bold text-[18px] text-center mb-1">Analyze with AI</h3>
-            <p class="text-slate-500 text-[13px] text-center mb-4">Tag a few sample VINs per class (ideally 5+) so the classifier can learn what each issue looks like for this team. Then run it over the <b id="ai-prompt-pending">0</b> pending VINs. Classes with no samples are skipped.</p>
-            <div id="ai-prompt-counts" class="grid grid-cols-2 gap-2 mb-5 text-[12px] bg-slate-50 rounded-lg p-3"></div>
+            <p class="text-slate-500 text-[13px] text-center mb-4">Tag a few sample VINs per class so the classifier knows what each issue looks like for this team. Then run it over the <b id="ai-prompt-pending">0</b> pending VINs.</p>
+            <div id="ai-prompt-counts" class="grid grid-cols-2 gap-2 mb-4 text-[12px] bg-slate-50 rounded-lg p-3"></div>
+            <!-- Classifier version toggle. v2 is new (zero-shot text priors +
+                 user samples refine, works with 0-sample classes). v1 is the
+                 original centroid-only classifier for A/B comparison. -->
+            <div class="mb-4 rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+                <div class="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Classifier</div>
+                <div id="ai-classifier-toggle" class="flex gap-2 text-[12px]"></div>
+                <div class="text-[10.5px] text-slate-500 mt-2" id="ai-classifier-hint"></div>
+            </div>
             <div class="flex space-x-2">
                 <button onclick="aiClosePromptModal()" class="flex-1 bg-white border border-slate-300 text-slate-700 font-semibold py-2.5 rounded-lg hover:bg-slate-50">Review more</button>
-                <button onclick="aiRunAnalysis()" class="flex-1 text-white font-semibold py-2.5 rounded-lg" style="background:#4f46e5">Analyze with AI</button>
+                <button onclick="aiRunAnalysisDispatch()" class="flex-1 text-white font-semibold py-2.5 rounded-lg" style="background:#4f46e5">Analyze with AI</button>
+            </div>
+            <!-- A/B footer: lets the reviewer run BOTH versions back-to-back
+                 on the same CSV and open the comparison dialog. -->
+            <div class="mt-3 text-center">
+                <button onclick="aiRunAbComparison()" class="text-[11px] font-semibold text-indigo-600 hover:text-indigo-800 underline">Run A/B comparison (v1 then v2)</button>
             </div>
         </div>
     </div>
@@ -5076,6 +5089,92 @@
     function isStockCdnUrl(u) { return !!u && STOCK_CDN_URL_RE.test(u); }
     const AI_FETCH_CONCURRENCY = 15; // parallel image fetches (CLIP embed stays serial)
     const AI_FETCH_RETRIES     = 2;  // retries on image fetch error (incl. proxy 5xx)
+
+    // ─────────────────────────────────────────────────────────────────────
+    // AI classifier v2: zero-shot text priors + user-sample refinement
+    // ─────────────────────────────────────────────────────────────────────
+    // Why v2 exists: v1's centroid-only classifier needs ≥5 samples per class
+    // to even consider that class. In practice teams tag 1-3 of some classes
+    // (Hero, Photo NA) so those classes are excluded entirely and legitimate
+    // instances drop to Uncategorized. v2 uses CLIP's zero-shot text priors
+    // as the baseline so every class is in play from the start; user samples
+    // just refine. Same thresholds work across every client because the text
+    // priors are the semantic anchor — no per-CSV tuning.
+    //
+    // Prompts per class are averaged into one normalized text centroid to
+    // smooth word-anchor biases (CLIP latches onto specific tokens). More
+    // prompts = more robust at the cost of a one-time 15-prompt text embed
+    // (~0.5s on first model load, cached forever after).
+    const AI_V2_PROMPTS = {
+        ok: [
+            "a car photographed inside a dealership studio with a clean uniform background",
+            "a vehicle on a seamless studio floor under professional lighting",
+            "a car centered in frame against a plain backdrop",
+        ],
+        raw: [
+            "a car parked outdoors in a parking lot with other vehicles buildings or trees visible",
+            "a candid unedited photograph of a car outside with surroundings in view",
+            "a vehicle in a dealer lot with pavement sky and background clutter visible",
+        ],
+        stock: [
+            "a glossy manufacturer press photo of a brand new car isolated on a plain background",
+            "a CGI render of a new car for a marketing brochure",
+            "an OEM product shot of a vehicle on a seamless studio sweep",
+        ],
+        hero: [
+            "a dramatic marketing hero shot of a car with cinematic lighting",
+            "a wide-angle vehicle advertisement with the car on an open road or scenic backdrop",
+            "a stylized hero image of a car used in automotive advertising",
+        ],
+        photo_na: [
+            "a placeholder image saying no photo available",
+            "a grey rectangle with text indicating no image",
+            "a camera-with-slash icon for a missing photograph",
+        ],
+    };
+    // Weighting: when a class has user samples, blend text prior + sample
+    // centroid. 0.5/0.5 lets samples take over if they strongly disagree
+    // with the text prior (e.g. an unusual studio look) while text keeps a
+    // vote so one noisy sample doesn't dominate. When no samples exist for
+    // a class, score = text_sim only.
+    const AI_V2_TEXT_WEIGHT   = 0.5;
+    const AI_V2_SAMPLE_WEIGHT = 0.5;
+    // Softmax temperature: CLIP's native logit_scale is ~100 (T≈0.01) which
+    // produces razor-sharp distributions. For our use we want some gradation
+    // so a close call surfaces as low confidence instead of 99/1; T=0.07
+    // gives readable confidence scores (top class ~60-95% when clear).
+    const AI_V2_SOFTMAX_TEMP  = 0.07;
+    // Minimum margin between top-class probability and second-class prob to
+    // call it a confident suggestion. Below this → Uncategorized with best
+    // guess surfaced for the reviewer. Chosen so clear studio shots clear
+    // easily (margin > 0.5) and borderline Stock-vs-Hero stays uncategorized.
+    const AI_V2_CONF_MARGIN   = 0.15;
+    // Cross-VIN batching: process N decoded images per CLIP forward pass.
+    // ONNX export has dynamic batch dim so this is free throughput. Larger
+    // batch helps WebGPU more (kernel launch dominates for small inputs)
+    // but costs peak memory, so cap conservatively per backend.
+    const AI_BATCH_WASM   = 4;
+    const AI_BATCH_WEBGPU = 8;
+    // When true, try fp16 quantized weights on WebGPU first (4× smaller
+    // download, 1.5-2× faster). Falls back to fp32 if the backend rejects it.
+    const AI_V2_PREFER_FP16 = true;
+    const AI_V2_VERSION_KEY = 'spyne_ai_classifier_version';
+    const AI_ALL_CLASSES    = ['ok', ...AI_FOCUS_CLASSES];
+
+    // Cached across all runs of a given model load. Rebuilt when the model
+    // reloads (e.g. tab reload). Shape: { ok: Float32Array(D), raw: ..., ... }
+    let aiTextCentroids = null;
+    // Side-by-side A/B results, keyed by team. Each entry holds the full
+    // suggestion map, stats, and wall-clock for both v1 and v2 so the UI
+    // can render a comparison without re-running.
+    const aiAbRuns = {};   // { teamId: { v1: {suggestions, stats, elapsedMs}, v2: {...} } }
+
+    function aiGetClassifierVersion() {
+        try { return localStorage.getItem(AI_V2_VERSION_KEY) === 'v1' ? 'v1' : 'v2'; } catch (_) { return 'v2'; }
+    }
+    function aiSetClassifierVersion(v) {
+        try { localStorage.setItem(AI_V2_VERSION_KEY, v === 'v1' ? 'v1' : 'v2'); } catch (_) {}
+    }
     // Dealer inventory CDNs don't send Access-Control-Allow-Origin, so a plain
     // fetch() from a browser is blocked. Route image reads through a proxy
     // that adds the header. '' disables the proxy (direct fetch). For scale
@@ -5115,26 +5214,244 @@
             const loadModel = (opts) => mod.CLIPVisionModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32', opts);
 
             if (preferDevice === 'webgpu') {
+                // Try fp16 first (smaller + faster), fall back to fp32 if the
+                // adapter rejects it. Xenova's port exports both quantizations.
+                if (AI_V2_PREFER_FP16) {
+                    try {
+                        onStatus && onStatus('Loading CLIP (WebGPU, fp16, ~25MB)…');
+                        const [processor, model] = await Promise.all([loadProcessor(), loadModel({ device: 'webgpu', dtype: 'fp16' })]);
+                        aiExtractor = { processor, model, mod, RawImage: mod.RawImage, device: 'webgpu', dtype: 'fp16' };
+                        console.log('[AI classifier] vision model loaded on WebGPU (fp16)');
+                        return aiExtractor;
+                    } catch (err) {
+                        console.warn('[AI classifier] fp16 WebGPU failed, trying fp32:', err);
+                    }
+                }
                 try {
-                    onStatus && onStatus('Loading CLIP model on WebGPU (fast, ~85MB first time)…');
+                    onStatus && onStatus('Loading CLIP (WebGPU, fp32, ~85MB)…');
                     const [processor, model] = await Promise.all([loadProcessor(), loadModel({ device: 'webgpu', dtype: 'fp32' })]);
-                    aiExtractor = { processor, model, RawImage: mod.RawImage, device: 'webgpu' };
-                    console.log('[AI classifier] model loaded on WebGPU');
+                    aiExtractor = { processor, model, mod, RawImage: mod.RawImage, device: 'webgpu', dtype: 'fp32' };
+                    console.log('[AI classifier] vision model loaded on WebGPU (fp32)');
                     return aiExtractor;
                 } catch (err) {
                     console.warn('[AI classifier] WebGPU load failed, falling back to CPU WASM:', err);
-                    onStatus && onStatus('WebGPU unavailable; loading on CPU WASM (~90MB first time)…');
+                    onStatus && onStatus('WebGPU unavailable; loading on CPU WASM (~90MB)…');
                 }
             } else {
-                onStatus && onStatus('Loading CLIP model on CPU WASM (~90MB first time)…');
+                onStatus && onStatus('Loading CLIP on CPU WASM (~90MB first time)…');
             }
 
             const [processor, model] = await Promise.all([loadProcessor(), loadModel({})]);
-            aiExtractor = { processor, model, RawImage: mod.RawImage, device: 'wasm' };
-            console.log('[AI classifier] model loaded on CPU WASM');
+            aiExtractor = { processor, model, mod, RawImage: mod.RawImage, device: 'wasm', dtype: 'int8' };
+            console.log('[AI classifier] vision model loaded on CPU WASM');
             return aiExtractor;
         })();
         return aiExtractorPromise;
+    }
+
+    // Lazy-load the text tower on first v2 run (vision tower loads earlier for
+    // v1 too). Cached on the same extractor object so it's loaded at most once
+    // per tab session.
+    async function aiLoadTextModel(ex, onStatus) {
+        if (ex.textModel && ex.tokenizer) return;
+        if (ex._textPromise) { await ex._textPromise; return; }
+        ex._textPromise = (async () => {
+            onStatus && onStatus('Loading CLIP text tower…');
+            const mod = ex.mod;
+            const tokenizer = await mod.AutoTokenizer.from_pretrained('Xenova/clip-vit-base-patch32');
+            const textOpts = {};
+            if (ex.device === 'webgpu') { textOpts.device = 'webgpu'; textOpts.dtype = ex.dtype || 'fp32'; }
+            let textModel;
+            try {
+                textModel = await mod.CLIPTextModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32', textOpts);
+            } catch (err) {
+                // On WebGPU dtype rejection, fall back to default (CPU)
+                console.warn('[AI classifier] text tower on', ex.device, 'failed, using default:', err);
+                textModel = await mod.CLIPTextModelWithProjection.from_pretrained('Xenova/clip-vit-base-patch32', {});
+            }
+            ex.tokenizer = tokenizer;
+            ex.textModel = textModel;
+            console.log('[AI classifier] text tower loaded');
+        })();
+        await ex._textPromise;
+    }
+
+    // Compute text centroids for every class from AI_V2_PROMPTS. One text
+    // embed per prompt via the CLIP text tower, mean-pooled per class, L2
+    // normalized. Called once per model load and cached on aiTextCentroids.
+    async function aiBuildTextCentroids(ex, onStatus) {
+        if (aiTextCentroids) return aiTextCentroids;
+        await aiLoadTextModel(ex, onStatus);
+        onStatus && onStatus('Embedding class text prompts…');
+        const classes = Object.keys(AI_V2_PROMPTS);
+        const flatPrompts = [];
+        const flatClass = [];
+        classes.forEach(c => AI_V2_PROMPTS[c].forEach(p => { flatPrompts.push(p); flatClass.push(c); }));
+        const inputs = await ex.tokenizer(flatPrompts, { padding: true, truncation: true });
+        const out = await ex.textModel(inputs);
+        const dims = out.text_embeds.dims || [];
+        const D = dims[dims.length - 1] || (out.text_embeds.data.length / flatPrompts.length) | 0;
+        const data = out.text_embeds.data;
+        const vecsByClass = {};
+        classes.forEach(c => vecsByClass[c] = []);
+        for (let i = 0; i < flatPrompts.length; i++) {
+            vecsByClass[flatClass[i]].push(aiNormalizeEmbed(data.subarray(i * D, (i + 1) * D)));
+        }
+        const centroids = {};
+        for (const c of classes) {
+            const vecs = vecsByClass[c];
+            if (!vecs.length) continue;
+            const mean = new Float32Array(vecs[0].length);
+            vecs.forEach(v => { for (let k = 0; k < mean.length; k++) mean[k] += v[k]; });
+            let n = 0;
+            for (let k = 0; k < mean.length; k++) { mean[k] /= vecs.length; n += mean[k] * mean[k]; }
+            n = Math.sqrt(n) || 1;
+            for (let k = 0; k < mean.length; k++) mean[k] /= n;
+            centroids[c] = mean;
+        }
+        aiTextCentroids = centroids;
+        return centroids;
+    }
+
+    // Cross-VIN batched embedding pipeline. Fetches up to fetchConcurrency
+    // images in parallel, then buffers decoded images into batches of
+    // batchSize for ONE forward pass per batch. On WebGPU this is a 3-5x
+    // throughput win vs per-image forwards; on WASM it's ~1.5-2x because
+    // the backend is single-threaded but kernel-launch overhead amortizes.
+    //
+    // onItem({idx, url, emb, err}) fires in INPUT ORDER as results become
+    // available; emb is a Float32Array(D) (single-crop, no multi-crop).
+    async function aiPipelineEmbedBatched(urls, fetchConcurrency, batchSize, onItem, isCancelled) {
+        const ex = await aiLoadModel();
+        const inflight = new Map();
+        let fetchHead = 0;
+        const queueOne = () => {
+            while (fetchHead < urls.length && inflight.size < fetchConcurrency) {
+                const i = fetchHead++;
+                const url = urls[i];
+                if (!url) { inflight.set(i, Promise.resolve(null)); continue; }
+                if (aiEmbedCache.has(url)) { inflight.set(i, Promise.resolve('__cached__')); continue; }
+                inflight.set(i, aiFetchRaw(url, ex).catch(err => ({__err: err})));
+            }
+        };
+        queueOne();
+
+        const batch = [];     // { idx, url, raw }
+        const flushBatch = async () => {
+            if (!batch.length) return;
+            if (isCancelled && isCancelled()) { batch.length = 0; return; }
+            try {
+                const inputs = await ex.processor(batch.map(b => b.raw));
+                const out = await ex.model(inputs);
+                const dims = out.image_embeds.dims || [];
+                const D = dims[dims.length - 1] || (out.image_embeds.data.length / batch.length) | 0;
+                const data = out.image_embeds.data;
+                for (let k = 0; k < batch.length; k++) {
+                    const emb = aiNormalizeEmbed(data.subarray(k * D, (k + 1) * D));
+                    // Cache under the v2 shape ({full}) so a later v1 run on
+                    // the same URL still finds a usable entry if present.
+                    aiEmbedCache.set(batch[k].url, { full: emb, center: emb, top: emb });
+                    onItem({ idx: batch[k].idx, url: batch[k].url, emb, err: null });
+                }
+            } catch (e) {
+                for (const b of batch) onItem({ idx: b.idx, url: b.url, emb: null, err: e });
+            }
+            batch.length = 0;
+        };
+
+        for (let i = 0; i < urls.length; i++) {
+            if (isCancelled && isCancelled()) return;
+            const slot = inflight.get(i);
+            inflight.delete(i);
+            queueOne();
+            const url = urls[i];
+            let raw = null, err = null;
+            try {
+                const r = await slot;
+                if (r === '__cached__') {
+                    const cached = aiEmbedCache.get(url);
+                    const embOnly = cached && cached.full ? cached.full : cached;
+                    onItem({ idx: i, url, emb: embOnly, err: null });
+                    continue;
+                } else if (r && !r.__err) {
+                    raw = r;
+                } else {
+                    err = (r && r.__err) || new Error('fetch returned no image');
+                }
+            } catch (e) { err = e; }
+
+            if (err) { onItem({ idx: i, url, emb: null, err }); continue; }
+
+            batch.push({ idx: i, url, raw });
+            if (batch.length >= batchSize) await flushBatch();
+        }
+        await flushBatch();
+    }
+
+    // v2 scorer: text prior + optional user centroid, softmax, confidence
+    // margin check. Returns { cls, conf, scores, bestGuess }.
+    //  - If no user samples for class c: score[c] = cos(img, textCentroid[c])
+    //  - If user samples exist: score[c] = w_text·textSim + w_user·userSim
+    //  - Softmax over all AI_ALL_CLASSES → probs
+    //  - Pick argmax; if (topProb - secondProb) < margin, return uncategorized
+    //    with bestGuess so the UI can still show "~OK 72%"
+    function aiScoreV2(imgEmb, textCentroids, userCentroids) {
+        const scores = {};
+        for (const c of AI_ALL_CLASSES) {
+            const tC = textCentroids[c];
+            const uC = userCentroids[c];
+            if (!tC) continue;
+            const textSim = aiCosine(imgEmb, tC);
+            if (uC) {
+                scores[c] = AI_V2_TEXT_WEIGHT * textSim + AI_V2_SAMPLE_WEIGHT * aiCosine(imgEmb, uC);
+            } else {
+                scores[c] = textSim;
+            }
+        }
+        const entries = Object.entries(scores);
+        const vals = entries.map(e => e[1]);
+        if (!vals.length) return { cls: 'uncategorized', conf: 0, scores, bestGuess: null };
+        const T = AI_V2_SOFTMAX_TEMP;
+        const maxV = Math.max.apply(null, vals);
+        let sumExp = 0;
+        const exps = vals.map(v => { const e = Math.exp((v - maxV) / T); sumExp += e; return e; });
+        const probs = {};
+        entries.forEach((e, i) => probs[e[0]] = exps[i] / sumExp);
+        const sorted = Object.entries(probs).sort((a, b) => b[1] - a[1]);
+        const [bestCls, bestProb] = sorted[0];
+        const secondProb = sorted[1] ? sorted[1][1] : 0;
+        const margin = bestProb - secondProb;
+        if (margin < AI_V2_CONF_MARGIN) {
+            return {
+                cls: 'uncategorized',
+                conf: 0,
+                scores: probs,
+                bestGuess: { cls: bestCls, conf: bestProb, margin, reason: 'below-margin' },
+            };
+        }
+        return { cls: bestCls, conf: bestProb, scores: probs, margin };
+    }
+
+    // Build a mean-normalized user-sample centroid per class from the
+    // Float32Array embeds we accumulated for samples of that class. Returns
+    // {ok: Float32Array|null, raw: ..., ...} — unlike v1 there is NO minimum
+    // sample count: 1-sample centroids are fine because the text prior keeps
+    // them honest via the 0.5/0.5 blend.
+    function aiBuildUserCentroidsV2(vecsByClass) {
+        const out = {};
+        for (const c of AI_ALL_CLASSES) {
+            const vecs = (vecsByClass[c] || []).filter(Boolean);
+            if (!vecs.length) { out[c] = null; continue; }
+            const dim = vecs[0].length;
+            const mean = new Float32Array(dim);
+            vecs.forEach(v => { for (let i = 0; i < dim; i++) mean[i] += v[i]; });
+            let n = 0;
+            for (let i = 0; i < dim; i++) { mean[i] /= vecs.length; n += mean[i] * mean[i]; }
+            n = Math.sqrt(n) || 1;
+            for (let i = 0; i < dim; i++) mean[i] /= n;
+            out[c] = mean;
+        }
+        return out;
     }
 
     async function aiFetchRaw(url, ex) {
@@ -5370,7 +5687,162 @@
                 '<div class="flex items-center gap-2"><span style="width:10px;height:10px;border-radius:3px;background:' + stateColor(c) + ';display:inline-block"></span><span class="text-slate-600">' + stateLabel(c) + ':</span><b class="text-slate-900">' + counts[c] + '</b></div>'
             ).join('');
         document.getElementById('ai-prompt-pending').textContent = pending;
+        aiRenderClassifierToggle();
         document.getElementById('ai-prompt-modal').classList.add('active');
+    }
+
+    function aiRenderClassifierToggle() {
+        const current = aiGetClassifierVersion();
+        const row = document.getElementById('ai-classifier-toggle');
+        const hint = document.getElementById('ai-classifier-hint');
+        if (!row) return;
+        const btn = (v, label, sub) => {
+            const sel = v === current;
+            const bg = sel ? '#4f46e5' : '#fff';
+            const col = sel ? '#fff' : '#334155';
+            const bd = sel ? '#4338ca' : '#cbd5e1';
+            return '<button type="button" onclick="aiPickClassifier(\'' + v + '\')" style="flex:1;background:' + bg + ';color:' + col + ';border:1px solid ' + bd + ';border-radius:8px;padding:8px 10px;text-align:left;cursor:pointer">'
+                + '<div style="font-weight:700;font-size:12px">' + label + '</div>'
+                + '<div style="font-size:10.5px;opacity:.85;margin-top:2px">' + sub + '</div>'
+                + '</button>';
+        };
+        row.innerHTML =
+            btn('v2', 'v2 · Zero-shot + samples', 'Works from 0 samples. Faster.') +
+            btn('v1', 'v1 · Centroid only', 'Needs ≥5 samples per class.');
+        hint.textContent = current === 'v2'
+            ? 'v2 blends CLIP text priors with your samples. Classes with 0 samples still work.'
+            : 'v1 skips classes with fewer than 5 samples (original behavior).';
+    }
+
+    function aiPickClassifier(v) {
+        aiSetClassifierVersion(v);
+        aiRenderClassifierToggle();
+    }
+
+    // A/B comparison: run v1 then v2 back-to-back on the same samples, then
+    // open the side-by-side comparison dialog. aiAbMode suppresses each
+    // run's auto-report-open so the reviewer sees the A/B dialog, not two
+    // flashes of a stale report.
+    async function aiRunAbComparison() {
+        if (aiRunInFlight) return;
+        aiClosePromptModal();
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        aiAbRuns[tid] = {};
+        aiAbMode = true;
+        try {
+            await aiRunAnalysis();
+            aiRunInFlight = false;    // defensive: in case v1 bailed via error path
+            await aiRunAnalysisV2();
+        } finally {
+            aiAbMode = false;
+        }
+        aiOpenAbReport();
+    }
+
+    function aiFormatMs(ms) {
+        if (!ms || ms < 1000) return (ms || 0) + ' ms';
+        const s = ms / 1000;
+        if (s < 60) return s.toFixed(1) + ' s';
+        return Math.floor(s / 60) + 'm ' + Math.round(s % 60) + 's';
+    }
+
+    function aiCountByClass(sugMap) {
+        const out = { ok: 0, uncategorized: 0 };
+        AI_FOCUS_CLASSES.forEach(c => out[c] = 0);
+        Object.values(sugMap || {}).forEach(info => {
+            if (out[info.cls] !== undefined) out[info.cls]++;
+        });
+        return out;
+    }
+
+    function aiOpenAbReport() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const ab = aiAbRuns[tid] || {};
+        const v1 = ab.v1, v2 = ab.v2;
+        if (!v1 || !v2) { showError('A/B comparison requires both v1 and v2 to have run.'); return; }
+        const c1 = aiCountByClass(v1.suggestions);
+        const c2 = aiCountByClass(v2.suggestions);
+        const classesRow = ['ok', ...AI_FOCUS_CLASSES, 'uncategorized'];
+        const rowHtml = (cls) => {
+            const n1 = c1[cls] || 0, n2 = c2[cls] || 0;
+            const delta = n2 - n1;
+            const col = stateColor(cls === 'uncategorized' ? 'raw' : cls);
+            const label = cls === 'uncategorized' ? 'Uncategorized' : (cls === 'ok' ? 'OK' : stateLabel(cls));
+            const deltaStr = delta === 0 ? '—' : (delta > 0 ? '+' + delta : String(delta));
+            const deltaCol = delta === 0 ? '#64748b' : (cls === 'uncategorized' ? (delta < 0 ? '#059669' : '#dc2626') : (delta > 0 ? '#059669' : '#dc2626'));
+            return '<tr>'
+                + '<td style="padding:6px 10px;border-bottom:1px solid #e2e8f0"><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:' + (cls==='uncategorized'?'#64748b':col) + ';margin-right:6px;vertical-align:middle"></span>' + label + '</td>'
+                + '<td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums">' + n1 + '</td>'
+                + '<td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums">' + n2 + '</td>'
+                + '<td style="padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:right;font-variant-numeric:tabular-nums;color:' + deltaCol + ';font-weight:600">' + deltaStr + '</td>'
+                + '</tr>';
+        };
+        // Agreement rate: how often the two classifiers picked the same class.
+        const keys = new Set([...Object.keys(v1.suggestions), ...Object.keys(v2.suggestions)]);
+        let agree = 0, disagree = 0;
+        keys.forEach(k => {
+            const a = (v1.suggestions[k] || {}).cls || 'uncategorized';
+            const b = (v2.suggestions[k] || {}).cls || 'uncategorized';
+            if (a === b) agree++; else disagree++;
+        });
+        const agreementPct = keys.size ? Math.round(100 * agree / keys.size) : 0;
+
+        let host = document.getElementById('ai-ab-modal');
+        if (!host) {
+            host = document.createElement('div');
+            host.id = 'ai-ab-modal';
+            host.className = 'modal-overlay';
+            host.onclick = (e) => { if (e.target === host) host.classList.remove('active'); };
+            document.body.appendChild(host);
+        }
+        host.innerHTML =
+            '<div class="bg-white rounded-xl shadow-2xl w-full max-w-xl" style="max-height:85vh;overflow:auto">'
+          +   '<div class="p-6">'
+          +     '<div class="flex items-start justify-between mb-3">'
+          +       '<div>'
+          +         '<h3 class="text-slate-800 font-bold text-[18px]">A/B comparison</h3>'
+          +         '<p class="text-slate-500 text-[12.5px] mt-1">Same CSV, same samples. Agreement <b>' + agreementPct + '%</b> · ' + disagree + ' disagreement' + (disagree === 1 ? '' : 's') + '.</p>'
+          +       '</div>'
+          +       '<button onclick="document.getElementById(\'ai-ab-modal\').classList.remove(\'active\')" class="text-slate-400 hover:text-slate-700 font-bold text-xl leading-none">×</button>'
+          +     '</div>'
+          +     '<div class="grid grid-cols-2 gap-3 mb-4">'
+          +       '<div class="rounded-lg border border-slate-200 p-3"><div class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">v1 wall-clock</div><div class="text-xl font-bold text-slate-800">' + aiFormatMs(v1.elapsedMs) + '</div></div>'
+          +       '<div class="rounded-lg border border-indigo-200 bg-indigo-50 p-3"><div class="text-[10px] font-bold text-indigo-500 uppercase tracking-wider mb-1">v2 wall-clock</div><div class="text-xl font-bold text-indigo-900">' + aiFormatMs(v2.elapsedMs) + '</div></div>'
+          +     '</div>'
+          +     '<table style="width:100%;font-size:12.5px;border-collapse:collapse" class="mb-4">'
+          +       '<thead><tr style="color:#64748b;font-size:10.5px;text-transform:uppercase;letter-spacing:.08em">'
+          +         '<th style="padding:4px 10px;text-align:left">Class</th>'
+          +         '<th style="padding:4px 10px;text-align:right">v1</th>'
+          +         '<th style="padding:4px 10px;text-align:right">v2</th>'
+          +         '<th style="padding:4px 10px;text-align:right">Δ</th>'
+          +       '</tr></thead>'
+          +       '<tbody>' + classesRow.map(rowHtml).join('') + '</tbody>'
+          +     '</table>'
+          +     '<div class="text-[11px] text-slate-500 mb-3">v2 excluded classes: <b>none</b> (text priors keep every class in play). v1 excluded: <b>' + Object.keys((v1.stats && v1.stats.excludedClasses) || {}).join(', ') || '—' + '</b></div>'
+          +     '<div class="flex gap-2">'
+          +       '<button onclick="aiKeepVersion(\'v1\')" class="flex-1 bg-white border border-slate-300 text-slate-700 font-semibold py-2 rounded-lg hover:bg-slate-50 text-[12.5px]">Keep v1 results</button>'
+          +       '<button onclick="aiKeepVersion(\'v2\')" class="flex-1 bg-indigo-600 text-white font-semibold py-2 rounded-lg hover:bg-indigo-700 text-[12.5px]">Keep v2 results (recommended)</button>'
+          +     '</div>'
+          +   '</div>'
+          + '</div>';
+        host.classList.add('active');
+    }
+
+    function aiKeepVersion(v) {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const ab = aiAbRuns[tid] || {};
+        const picked = ab[v];
+        if (picked) {
+            aiSuggestions[tid] = JSON.parse(JSON.stringify(picked.suggestions));
+            aiLastRunStats = picked.stats;
+        }
+        aiSetClassifierVersion(v);
+        try { document.getElementById('ai-ab-modal').classList.remove('active'); } catch (_) {}
+        try { render1ImgGallery(); } catch (_) {}
+        aiOpenReportModal();
     }
 
     function aiClosePromptModal() {
@@ -5385,15 +5857,17 @@
         try { aiCloseReportModal(); } catch (_) {}
         if (aiRunInFlight) return;        // a run is already in progress — ignore
         if (!currentImg1Team) return;
-        if (!aiAnySampleTagged()) {
-            // No samples at all → fall back to the prompt so the user sees why.
+        if (!aiAnySampleTagged() && aiGetClassifierVersion() === 'v1') {
+            // v1 can't run without samples; fall back to the prompt so the user
+            // sees why. v2 works zero-shot so no sample check needed.
             aiOpenPromptModal();
             return;
         }
-        aiRunAnalysis();
+        aiRunAnalysisDispatch();
     }
 
     let aiRunInFlight = false;
+    let aiAbMode      = false;   // true while A/B comparison is running v1 then v2
 
     function _aiLockGallery(lock) {
         // Grid + All-view containers both need the lock — selection, tile clicks
@@ -5440,6 +5914,7 @@
         if (!tid) return;
         if (aiRunInFlight) return;                     // prevent re-trigger during run
         aiRunInFlight = true;
+        const runStartT = Date.now();                  // for A/B wall-clock comparison with v2
         const myToken = ++aiRunToken;
         const progFill  = document.getElementById('ai-progress-fill');
         const progMsg   = document.getElementById('ai-progress-msg');
@@ -5660,16 +6135,207 @@
             );
             if (myToken !== aiRunToken) return;
 
+            stats.version   = 'v1';
+            stats.elapsedMs = Date.now() - runStartT;
             aiLastRunStats = stats;
-            console.log('[AI classifier] run stats', stats);
+            aiAbRuns[tid] = aiAbRuns[tid] || {};
+            aiAbRuns[tid].v1 = {
+                suggestions: JSON.parse(JSON.stringify(aiSuggestions[tid])),
+                stats,
+                elapsedMs: stats.elapsedMs,
+            };
+            console.log('[AI classifier v1] run stats', stats);
             aiRunInFlight = false;
             aiHideProgressPill();
             try { render1ImgGallery(); } catch (_) {}
-            aiOpenReportModal();
+            if (!aiAbMode) aiOpenReportModal();
         } catch (err) {
             progMsg.textContent = 'Error: ' + ((err && err.message) || err);
             setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 3000);
         }
+    }
+
+    // v2 orchestrator: zero-shot text priors + single-crop image embed +
+    // cross-VIN batched forward passes + softmax scoring. Writes into the
+    // same aiSuggestions bag v1 uses so the report UI and manual-review
+    // flow stay untouched. Also stashes a copy in aiAbRuns for comparison.
+    async function aiRunAnalysisV2() {
+        aiClosePromptModal();
+        try { aiCloseReportModal(); } catch (_) {}
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        if (aiRunInFlight) return;
+        aiRunInFlight = true;
+        const runStartT = Date.now();
+        const myToken = ++aiRunToken;
+        const progFill  = document.getElementById('ai-progress-fill');
+        const progMsg   = document.getElementById('ai-progress-msg');
+        const progCount = document.getElementById('ai-progress-count');
+        aiShowProgressPill();
+        progFill.style.width = '0%';
+        progCount.textContent = '0/0';
+        progMsg.textContent = 'Loading CLIP (v2)…';
+
+        try {
+            const ex = await aiLoadModel(msg => { progMsg.textContent = msg; });
+            if (myToken !== aiRunToken) return;
+
+            // Text centroids: one-time cost per model load, cached globally.
+            const tCentStart = Date.now();
+            const textCentroids = await aiBuildTextCentroids(ex, msg => { progMsg.textContent = msg; });
+            if (myToken !== aiRunToken) return;
+            const textCentroidMs = Date.now() - tCentStart;
+
+            const stats = {
+                version: 'v2',
+                sampleOk:{}, sampleFail:{},
+                pendingOk:0, pendingFail:0, pendingBelowMargin:0,
+                pendingAutoPhotoNA: 0, pendingAutoStock: 0,
+                maxConf: 0, firstError: null,
+                textWeight: AI_V2_TEXT_WEIGHT, sampleWeight: AI_V2_SAMPLE_WEIGHT,
+                softmaxT: AI_V2_SOFTMAX_TEMP, confMargin: AI_V2_CONF_MARGIN,
+                textCentroidMs,
+            };
+            AI_ALL_CLASSES.forEach(c => { stats.sampleOk[c] = 0; stats.sampleFail[c] = 0; });
+            const recordErr = (where, url, err) => {
+                if (!stats.firstError) stats.firstError = where + ': ' + ((err && err.message) || err);
+                console.error('[AI classifier v2] ' + where + ' failed for', url, err);
+            };
+
+            // Device-aware batch size.
+            const BATCH = ex.device === 'webgpu' ? AI_BATCH_WEBGPU : AI_BATCH_WASM;
+
+            // Sample embedding — single-crop only; the text prior does the
+            // discrimination work the old multi-crop guard did.
+            const sampleUrls = aiSampleUrlsByClass();
+            const sampleFlat = [];
+            AI_ALL_CLASSES.forEach(cls => (sampleUrls[cls] || []).forEach(u => sampleFlat.push({ cls, url: u })));
+            const vecsByClass = {};
+            AI_ALL_CLASSES.forEach(c => vecsByClass[c] = []);
+            progMsg.textContent = 'Embedding ' + sampleFlat.length + ' sample images (v2)…';
+            progCount.textContent = '0/' + sampleFlat.length;
+            const sampleStartT = Date.now();
+            let sampleDone = 0;
+            await aiPipelineEmbedBatched(
+                sampleFlat.map(x => x.url),
+                AI_FETCH_CONCURRENCY,
+                BATCH,
+                ({ idx, url, emb, err }) => {
+                    if (myToken !== aiRunToken) return;
+                    const cls = sampleFlat[idx].cls;
+                    if (err) {
+                        stats.sampleFail[cls]++;
+                        recordErr('sample ' + cls, url, err);
+                    } else if (emb) {
+                        vecsByClass[cls].push(emb);
+                        stats.sampleOk[cls]++;
+                    }
+                    sampleDone++;
+                    if (sampleDone % 3 === 0 || sampleDone === sampleFlat.length) {
+                        progFill.style.width = (100 * sampleDone / Math.max(1, sampleFlat.length)) + '%';
+                        progCount.textContent = sampleDone + '/' + sampleFlat.length;
+                    }
+                },
+                () => myToken !== aiRunToken
+            );
+            if (myToken !== aiRunToken) return;
+            stats.sampleEmbedMs = Date.now() - sampleStartT;
+
+            const userCentroids = aiBuildUserCentroidsV2(vecsByClass);
+            stats.userCentroidClasses = AI_ALL_CLASSES.filter(c => !!userCentroids[c]);
+            stats.sampleCountByClass = {};
+            AI_ALL_CLASSES.forEach(c => stats.sampleCountByClass[c] = vecsByClass[c].length);
+            progFill.style.width = '0%';
+
+            // Fast-paths before CLIP: broken image → Photo NA, stock-CDN URL → Stock.
+            const allPendingIdxs = aiPendingVINIndices();
+            stats.pendingCount = allPendingIdxs.length;
+            aiSuggestions[tid] = {};
+            const pendingIdxs = [];
+            allPendingIdxs.forEach(i => {
+                const v = currentImg1VINs[i];
+                const firstUrl = v && v.urls && v.urls[0];
+                if (!firstUrl || img1BrokenImgIndices.has(i)) {
+                    aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: i, autoBrokenImg: true };
+                    stats.pendingAutoPhotoNA++;
+                } else if (isStockCdnUrl(firstUrl)) {
+                    aiSuggestions[tid][aiVinKey(v)] = { cls: 'stock', conf: 1.0, margin: 1.0, idx: i, autoStockCdn: true };
+                    stats.pendingAutoStock++;
+                } else {
+                    pendingIdxs.push(i);
+                }
+            });
+
+            const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
+            progCount.textContent = '0/' + pendingIdxs.length;
+            progMsg.textContent = 'Classifying ' + pendingIdxs.length + ' VINs on ' + ex.device.toUpperCase() + ' (batch ' + BATCH + ', v2)…';
+            const pendingStartT = Date.now();
+            let done = 0;
+            await aiPipelineEmbedBatched(
+                pendingUrls,
+                AI_FETCH_CONCURRENCY,
+                BATCH,
+                ({ idx: localIdx, url, emb, err }) => {
+                    if (myToken !== aiRunToken) return;
+                    const vinIdx = pendingIdxs[localIdx];
+                    const v = currentImg1VINs[vinIdx];
+                    if (err) {
+                        aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: vinIdx, autoBrokenImg: true };
+                        stats.pendingAutoPhotoNA++;
+                        stats.pendingFail++;
+                        recordErr('pending', url, err);
+                    } else if (emb) {
+                        stats.pendingOk++;
+                        const result = aiScoreV2(emb, textCentroids, userCentroids);
+                        if (result.cls === 'uncategorized') {
+                            stats.pendingBelowMargin++;
+                            aiSuggestions[tid][aiVinKey(v)] = {
+                                cls: 'uncategorized', conf: 0, idx: vinIdx,
+                                bestGuess: result.bestGuess,
+                            };
+                        } else {
+                            if (result.conf > stats.maxConf) stats.maxConf = result.conf;
+                            aiSuggestions[tid][aiVinKey(v)] = {
+                                cls: result.cls, conf: result.conf, margin: result.margin, idx: vinIdx,
+                            };
+                        }
+                    }
+                    done++;
+                    if (done % 3 === 0 || done === pendingIdxs.length) {
+                        progFill.style.width = (100 * done / Math.max(1, pendingIdxs.length)) + '%';
+                        progCount.textContent = done + '/' + pendingIdxs.length;
+                    }
+                },
+                () => myToken !== aiRunToken
+            );
+            if (myToken !== aiRunToken) return;
+            stats.pendingEmbedMs = Date.now() - pendingStartT;
+            stats.elapsedMs = Date.now() - runStartT;
+
+            aiLastRunStats = stats;
+            aiAbRuns[tid] = aiAbRuns[tid] || {};
+            aiAbRuns[tid].v2 = {
+                suggestions: JSON.parse(JSON.stringify(aiSuggestions[tid])),
+                stats,
+                elapsedMs: stats.elapsedMs,
+            };
+            console.log('[AI classifier v2] run stats', stats);
+            aiRunInFlight = false;
+            aiHideProgressPill();
+            try { render1ImgGallery(); } catch (_) {}
+            if (!aiAbMode) aiOpenReportModal();
+        } catch (err) {
+            progMsg.textContent = 'Error: ' + ((err && err.message) || err);
+            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 3000);
+        }
+    }
+
+    // Dispatcher — fires the version the user has selected in the prompt
+    // modal (persisted in localStorage, defaults to v2).
+    function aiRunAnalysisDispatch() {
+        const v = aiGetClassifierVersion();
+        if (v === 'v1') return aiRunAnalysis();
+        return aiRunAnalysisV2();
     }
 
     function aiCancelAnalysis() {
@@ -5736,7 +6402,16 @@
             const excludedNote = excludedKeys.length
                 ? ' <span class="text-amber-600 font-semibold">· ' + excludedKeys.length + ' class' + (excludedKeys.length === 1 ? '' : 'es') + ' skipped (not enough samples)</span>'
                 : '';
-            subtitleEl.innerHTML = parts.join(' · ') + excludedNote + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
+            // Version + wall-clock badge: tells the reviewer which classifier
+            // produced this report and how long it took, so A/B deltas are
+            // visible even without opening the comparison dialog.
+            const ver = aiLastRunStats && aiLastRunStats.version;
+            const ms  = aiLastRunStats && aiLastRunStats.elapsedMs;
+            const bg  = ver === 'v2' ? '#4f46e5' : '#64748b';
+            const verBadge = ver
+                ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;background:' + bg + ';color:#fff;font-weight:700;font-size:10.5px;letter-spacing:.06em;margin-left:4px">' + ver.toUpperCase() + (ms ? ' · ' + aiFormatMs(ms) : '') + '</span>'
+                : '';
+            subtitleEl.innerHTML = parts.join(' · ') + excludedNote + verBadge + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
         }
         const colorFor = (c) => c === 'uncategorized' ? '#64748b' : stateColor(c);
         const labelFor = (c) => c === 'uncategorized' ? 'Uncategorized' : stateLabel(c);
@@ -5876,6 +6551,8 @@
         if (!tid) return;
         const bucket = aiReportBucket();
         const classes = ['ok', ...AI_FOCUS_CLASSES, 'uncategorized'];
+        const version = (aiLastRunStats && aiLastRunStats.version) || '';
+        const elapsed = (aiLastRunStats && aiLastRunStats.elapsedMs) ? (aiLastRunStats.elapsedMs / 1000).toFixed(1) + 's' : '';
         const rows = [];
         classes.forEach(cls => (bucket[cls] || []).forEach(item => {
             const v = currentImg1VINs[item.idx];
@@ -5883,15 +6560,17 @@
             const url = (v.urls && v.urls[0]) || '';
             const finalState = getImg1Review(tid, v.vin, v.rooftop || '') || '';
             rows.push({
-                vin:            v.vin,
-                rooftop:        v.rooftop || '',
-                first_image:    url,
-                ai_suggestion:  cls,
-                confidence:     typeof item.conf === 'number' ? (item.conf * 100).toFixed(1) + '%' : '',
-                accepted:       item.accepted ? 'yes' : 'no',
-                was_user_sample: isSample(tid, v) ? 'yes' : 'no',
-                auto_route:     item.autoStockCdn ? 'stock-cdn' : (item.autoBrokenImg ? 'broken-image' : ''),
-                final_state:    finalState
+                vin:               v.vin,
+                rooftop:           v.rooftop || '',
+                first_image:       url,
+                ai_suggestion:     cls,
+                confidence:        typeof item.conf === 'number' ? (item.conf * 100).toFixed(1) + '%' : '',
+                accepted:          item.accepted ? 'yes' : 'no',
+                was_user_sample:   isSample(tid, v) ? 'yes' : 'no',
+                auto_route:        item.autoStockCdn ? 'stock-cdn' : (item.autoBrokenImg ? 'broken-image' : ''),
+                final_state:       finalState,
+                classifier_version: version,
+                run_elapsed:       elapsed,
             });
         }));
         // Also append user samples that didn't make it into bucket (they were
@@ -5903,15 +6582,17 @@
             if (seenKeys.has(vk)) return;
             const st = getImg1Review(tid, v.vin, v.rooftop || '') || '';
             rows.push({
-                vin:            v.vin,
-                rooftop:        v.rooftop || '',
-                first_image:    (v.urls && v.urls[0]) || '',
-                ai_suggestion:  '',
-                confidence:     '',
-                accepted:       '',
-                was_user_sample: 'yes',
-                auto_route:     '',
-                final_state:    st
+                vin:               v.vin,
+                rooftop:           v.rooftop || '',
+                first_image:       (v.urls && v.urls[0]) || '',
+                ai_suggestion:     '',
+                confidence:        '',
+                accepted:          '',
+                was_user_sample:   'yes',
+                auto_route:        '',
+                final_state:       st,
+                classifier_version: version,
+                run_elapsed:       elapsed,
             });
         });
         if (!rows.length) { alert('No classification rows to export yet.'); return; }
