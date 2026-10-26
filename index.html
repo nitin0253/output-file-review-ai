@@ -939,6 +939,10 @@
         <div class="px-6 py-3 border-t border-slate-100 flex justify-between items-center">
             <button onclick="aiRerunWithCurrentSamples()" class="text-[12px] text-slate-500 hover:text-slate-700">← Re-run with current samples</button>
             <div class="flex gap-2">
+                <button onclick="aiDownloadReportCSV()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-3 py-2 rounded-lg hover:bg-slate-50 text-[13px] flex items-center gap-1.5" title="Download the classification report as CSV">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4"/></svg>
+                    Download
+                </button>
                 <button onclick="aiCloseReportModal()" class="bg-white border border-slate-300 text-slate-700 font-semibold px-4 py-2 rounded-lg hover:bg-slate-50 text-[13px]">Dismiss</button>
                 <button onclick="aiAcceptAll()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-4 py-2 rounded-lg text-[13px]">Accept all</button>
             </div>
@@ -1116,6 +1120,7 @@
     function storageKey()     { return 'spyne_reviews_v2_' + (getCurrentUser() || 'anon'); }
     function storageKey1Img() { return 'spyne_1img_v2_'   + (getCurrentUser() || 'anon'); }
     function storageKey1ImgDone() { return 'spyne_1img_done_' + (getCurrentUser() || 'anon'); }
+    function storageKey1ImgSamples() { return 'spyne_1img_samples_' + (getCurrentUser() || 'anon'); }
 
     // One-time cleanup: Claude Vision verify was removed, so purge any API key
     // previously pasted into localStorage so it can't leak from an old session.
@@ -1610,12 +1615,48 @@
     function loadReviews() {
         try { reviews = JSON.parse(localStorage.getItem(storageKey()) || '{}'); } catch (e) { reviews = {}; }
         try { img1Reviews = JSON.parse(localStorage.getItem(storageKey1Img()) || '{}'); } catch (e) { img1Reviews = {}; }
+        try {
+            const raw = JSON.parse(localStorage.getItem(storageKey1ImgSamples()) || '{}');
+            img1Samples = {};
+            Object.entries(raw).forEach(([teamKey, arr]) => { img1Samples[teamKey] = new Set(arr); });
+        } catch (e) { img1Samples = {}; }
     }
     function persistReviews() {
         try { localStorage.setItem(storageKey(), JSON.stringify(reviews)); } catch (e) {}
     }
     function persist1ImgReviews() {
         try { localStorage.setItem(storageKey1Img(), JSON.stringify(img1Reviews)); } catch (e) {}
+    }
+    function persist1ImgSamples() {
+        try {
+            const dump = {};
+            Object.entries(img1Samples || {}).forEach(([k, s]) => { dump[k] = [...s]; });
+            localStorage.setItem(storageKey1ImgSamples(), JSON.stringify(dump));
+        } catch (e) {}
+    }
+
+    // Samples the reviewer manually tagged (as opposed to AI-accepted suggestions).
+    // Key is img1ReviewKey(teamId, vin, rooftop); member is the vinKey.
+    let img1Samples = {};
+    function _sampleVinKey(v) { return v.rooftop ? v.vin + '|~|' + v.rooftop : v.vin; }
+    function _sampleTeamKey(teamId, v) { return (typeof img1ReviewKey === 'function') ? img1ReviewKey(teamId, v.vin, v.rooftop || '') : teamId; }
+    function markSample(teamId, v) {
+        const k = _sampleTeamKey(teamId, v);
+        if (!img1Samples[k]) img1Samples[k] = new Set();
+        img1Samples[k].add(_sampleVinKey(v));
+        persist1ImgSamples();
+    }
+    function unmarkSample(teamId, v) {
+        const k = _sampleTeamKey(teamId, v);
+        if (img1Samples[k]) {
+            img1Samples[k].delete(_sampleVinKey(v));
+            if (img1Samples[k].size === 0) delete img1Samples[k];
+            persist1ImgSamples();
+        }
+    }
+    function isSample(teamId, v) {
+        const k = _sampleTeamKey(teamId, v);
+        return !!(img1Samples[k] && img1Samples[k].has(_sampleVinKey(v)));
     }
     function getReview(teamId, vin) { return (reviews[teamId] && reviews[teamId][vin]) || null; }
     function setReview(teamId, vin, status, comment, issues) {
@@ -3384,6 +3425,8 @@
     function svSetIssue(newSt) {
         if (currentImg1Idx < 0) return;
         const v = currentImg1VINs[currentImg1Idx];
+        if (newSt === null) unmarkSample(currentImg1Team.teamId, v);
+        else                markSample(currentImg1Team.teamId, v);
         setImg1Review(currentImg1Team.teamId, v.vin, newSt, '');
         updateImg1ProgressBadge();
         updateTileIssueState(currentImg1Idx, newSt);
@@ -3441,6 +3484,11 @@
             if (allHave) newSt = null;
         }
         targets.forEach(i => {
+            const _v = currentImg1VINs[i];
+            if (_v) {
+                if (newSt === null) unmarkSample(currentImg1Team.teamId, _v);
+                else                markSample(currentImg1Team.teamId, _v);
+            }
             setImg1ReviewForIdx(i, newSt);
             updateTileIssueState(i, newSt);
         });
@@ -5719,6 +5767,74 @@
         document.getElementById('ai-report-modal').classList.remove('active');
     }
 
+    // CSV of the last classification run: one row per pending VIN that got a
+    // suggestion (including Uncategorized). Columns surface the raw signal the
+    // reviewer would want when sharing results — VIN + first image URL so a
+    // reader can click through, class + confidence + accepted flag so they can
+    // see which bucket a VIN landed in, and was_user_sample so a reader can see
+    // which VINs trained this run's centroids.
+    function aiDownloadReportCSV() {
+        const tid = currentImg1Team?.teamId;
+        if (!tid) return;
+        const bucket = aiReportBucket();
+        const classes = ['ok', ...AI_FOCUS_CLASSES, 'uncategorized'];
+        const rows = [];
+        classes.forEach(cls => (bucket[cls] || []).forEach(item => {
+            const v = currentImg1VINs[item.idx];
+            if (!v) return;
+            const url = (v.urls && v.urls[0]) || '';
+            const finalState = getImg1Review(tid, v.vin, v.rooftop || '') || '';
+            rows.push({
+                vin:            v.vin,
+                rooftop:        v.rooftop || '',
+                first_image:    url,
+                ai_suggestion:  cls,
+                confidence:     typeof item.conf === 'number' ? (item.conf * 100).toFixed(1) + '%' : '',
+                accepted:       item.accepted ? 'yes' : 'no',
+                was_user_sample: isSample(tid, v) ? 'yes' : 'no',
+                auto_route:     item.autoStockCdn ? 'stock-cdn' : (item.autoBrokenImg ? 'broken-image' : ''),
+                final_state:    finalState
+            });
+        }));
+        // Also append user samples that didn't make it into bucket (they were
+        // already-reviewed before the run and so skipped by aiReportBucket).
+        const seenKeys = new Set(rows.map(r => (r.rooftop ? r.vin + '|~|' + r.rooftop : r.vin)));
+        (currentImg1VINs || []).forEach(v => {
+            if (!isSample(tid, v)) return;
+            const vk = _sampleVinKey(v);
+            if (seenKeys.has(vk)) return;
+            const st = getImg1Review(tid, v.vin, v.rooftop || '') || '';
+            rows.push({
+                vin:            v.vin,
+                rooftop:        v.rooftop || '',
+                first_image:    (v.urls && v.urls[0]) || '',
+                ai_suggestion:  '',
+                confidence:     '',
+                accepted:       '',
+                was_user_sample: 'yes',
+                auto_route:     '',
+                final_state:    st
+            });
+        });
+        if (!rows.length) { alert('No classification rows to export yet.'); return; }
+        const headers = Object.keys(rows[0]);
+        const esc = s => {
+            const str = (s == null) ? '' : String(s);
+            return /[",\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+        };
+        const csv = headers.join(',') + '\n' +
+                    rows.map(r => headers.map(h => esc(r[h])).join(',')).join('\n');
+        const team = teamsList.find(t => t.teamId === tid);
+        const safe = (team?.name || tid).replace(/[^\w\-]+/g, '_').slice(0, 60);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8;' });  // BOM for Excel
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `ai-report_${safe}_${stamp}.csv`;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+    }
+
     function aiAcceptClass(cls) {
         if (cls === 'uncategorized') return;   // not a real review state
         const tid = currentImg1Team?.teamId;
@@ -7112,6 +7228,16 @@
             applyStateBadge(stBadge, st);
             tile.appendChild(stBadge);
 
+            // Sample badge — top-RIGHT: lights up when THIS reviewer manually tagged
+            // this VIN (as opposed to accepting an AI suggestion). Lets the user see
+            // which VINs the next classifier run will treat as training samples.
+            const sampleBadge = document.createElement('div');
+            sampleBadge.className = 'img1-sample-badge';
+            sampleBadge.textContent = 'SAMPLE';
+            sampleBadge.title = 'You tagged this VIN manually — the AI classifier will use it as a training sample.';
+            sampleBadge.style.display = isSample(currentImg1Team.teamId, v) ? 'inline-flex' : 'none';
+            tile.appendChild(sampleBadge);
+
             // (Per-tile R/S/I circles removed — all issues are tagged from the top bar / keyboard)
 
             // Selection checkbox — bottom-RIGHT corner
@@ -7247,6 +7373,11 @@
         // Short-code state badge (top-left)
         const stBadge = tile.querySelector('.img1-state-badge') || tile.children[1];
         applyStateBadge(stBadge, st);
+        // Sample badge (top-right) — tracks user-tagged VINs independently of state
+        const sb = tile.querySelector('.img1-sample-badge');
+        if (sb && currentImg1Team && currentImg1VINs[idx]) {
+            sb.style.display = isSample(currentImg1Team.teamId, currentImg1VINs[idx]) ? 'inline-flex' : 'none';
+        }
         // Keep filter chips + tile visibility in sync after any state change
         try { renderGridFilterChips(); applyGridFilter(); } catch (_) {}
     }

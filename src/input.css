@@ -682,6 +682,28 @@ body {
 #drive-mode-panel.hidden #load-drive-btn { display: none; }
 
 /* =========================================================================
+ * Sample badge — top-right corner of tiles the reviewer manually tagged
+ * ========================================================================= */
+.img1-sample-badge {
+    position: absolute; top: 5px; right: 5px; z-index: 6;
+    display: inline-flex; align-items: center; gap: 4px;
+    background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #ec4899));
+    color: #fff;
+    font-size: 9px; font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 10px;
+    letter-spacing: 0.08em;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.3), 0 0 0 1px rgba(255,255,255,0.15) inset;
+    text-transform: uppercase;
+    pointer-events: none;
+}
+.img1-sample-badge::before {
+    content: '';
+    width: 5px; height: 5px; border-radius: 50%;
+    background: #fff; box-shadow: 0 0 6px rgba(255,255,255,0.9);
+}
+
+/* =========================================================================
  * AI run lock — kill pointer events on the gallery while classifier is running
  * ========================================================================= */
 #images-grid.ai-locked,
