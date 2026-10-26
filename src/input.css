@@ -666,6 +666,25 @@ body {
     backdrop-filter: blur(10px);
     letter-spacing: 0.01em;
     transition: transform var(--t), box-shadow var(--t), background var(--t);
+    /* Breathing room so the enterprise name (long snake_case tokens) never
+     * touches the edges, and so a wrapped line keeps a visible side margin. */
+    padding-left: 1.25rem !important;
+    padding-right: 1.25rem !important;
+    line-height: 1.3;
+    text-align: center;
+}
+/* Enterprise names like "apex_piedmont_chrysler_dodge_jeep_ram_…" have no
+ * natural break points — underscores and dashes aren't soft wrap points by
+ * default. Allow the browser to break anywhere inside the label so long names
+ * wrap neatly within the button instead of spilling out the sides. */
+#load-dealers-btn > span,
+#load-csv-btn > span,
+#load-drive-btn > span {
+    display: inline-block;
+    max-width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
 }
 #load-dealers-btn:hover:not(:disabled),
 #load-csv-btn:hover:not(:disabled),
