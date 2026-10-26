@@ -5057,13 +5057,22 @@
     // reflective dealer photos are the most common accuracy miss, so it gets a
     // stricter 80% bar — borderline cases fall into Uncategorized for human review.
     const AI_CLASS_THRESHOLD = { stock: 0.80 };
-    // Stock-CDN short-circuit: dealer stock-image CDNs (EVOX via
-    // service.secureoffersites.com, URL path FGetEvoxImage) hotlink-protect
-    // based on Referer + User-Agent AND fingerprint on Cloudflare's injected
-    // CF-Worker/Cdn-Loop headers, so neither direct fetch nor our Worker
-    // proxy can read them. A URL from one of these hosts is definitionally
-    // a stock image, so tag it Stock without a CLIP pass.
-    const STOCK_CDN_URL_RE = /^https?:\/\/[^\/]*secureoffersites\.com\/|FGetEvoxImage/i;
+    // Stock-CDN short-circuit: any URL whose path PROVES it's an OEM/stock
+    // photo (not an in-studio dealer capture) is tagged Stock directly, no
+    // CLIP pass needed. Covers:
+    //   - EVOX (service.secureoffersites.com / FGetEvoxImage) — also unfetchable
+    //     because EVOX hotlink-fingerprints Cloudflare's injected headers so
+    //     neither direct fetch nor our Worker proxy can read these bytes.
+    //   - Autodata US (images.dealer.com/autodata/us/) — Experian Autodata's
+    //     OEM color-chip stock-photo library, keyed by model/color.
+    //   - DealerDotCom manufacturer renders (images.dealer.com/ddc/vehicles/
+    //     <year>/<Make>/…) — Cox Automotive's OEM render library, keyed by
+    //     trim and factory paint code.
+    //   - Any path containing OEM_VIN_STOCK_PHOTOS (e.g. Stellantis'
+    //     generic-stellantis-OEM_VIN_STOCK_PHOTOS/ folder).
+    // Field evidence (2026-10-26 Jeep/Chrysler run): 13 of 93 Uncategorized
+    // were from these three CDNs, all unambiguously OEM renders.
+    const STOCK_CDN_URL_RE = /^https?:\/\/[^\/]*secureoffersites\.com\/|FGetEvoxImage|\/autodata\/us\/|\/ddc\/vehicles\/|OEM_VIN_STOCK_PHOTOS/i;
     function isStockCdnUrl(u) { return !!u && STOCK_CDN_URL_RE.test(u); }
     const AI_FETCH_CONCURRENCY = 15; // parallel image fetches (CLIP embed stays serial)
     const AI_FETCH_RETRIES     = 2;  // retries on image fetch error (incl. proxy 5xx)
