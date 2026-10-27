@@ -858,7 +858,11 @@
             </div>
             <p id="ai-progress-msg" class="text-[11px] text-slate-500 truncate mt-0.5">Loading…</p>
             <div class="ai-progress-bar mt-2" style="height:4px"><div id="ai-progress-fill" class="ai-progress-fill" style="width:0%"></div></div>
-            <div class="text-[10px] text-slate-400 mt-1 text-right"><span id="ai-progress-count">0/0</span> · <span id="ai-progress-lock-hint">marking is paused until the run finishes</span></div>
+            <div class="text-[10px] text-slate-400 mt-1 flex items-center justify-between gap-2">
+                <span id="ai-progress-count">0/0</span>
+                <span id="ai-progress-timing" class="font-mono"></span>
+            </div>
+            <div class="text-[10px] text-slate-400 mt-0.5 text-right"><span id="ai-progress-device"></span> · <span id="ai-progress-lock-hint">marking is paused until the run finishes</span></div>
         </div>
     </div>
 </div>
@@ -5313,57 +5317,144 @@
         return centroids;
     }
 
-    // Cross-VIN batched embedding pipeline. Fetches up to fetchConcurrency
-    // images in parallel, then buffers decoded images into batches of
-    // batchSize for ONE forward pass per batch. On WebGPU this is a 3-5x
-    // throughput win vs per-image forwards; on WASM it's ~1.5-2x because
-    // the backend is single-threaded but kernel-launch overhead amortizes.
+    // Fast image fetch + resize path. The default aiFetchRaw calls
+    // ex.RawImage.read(url) which fetches, then decodes the image at its
+    // natural (often 2048×1536) size before Transformers.js's processor
+    // then resizes it to CLIP's 224×224. For a 128-VIN run this spends
+    // ~70% of per-image wall-clock on full-res decode we throw away.
     //
-    // onItem({idx, url, emb, err}) fires in INPUT ORDER as results become
-    // available; emb is a Float32Array(D) (single-crop, no multi-crop).
-    async function aiPipelineEmbedBatched(urls, fetchConcurrency, batchSize, onItem, isCancelled) {
+    // aiFetchRawFast fetches the blob directly and uses the browser's
+    // hardware-accelerated createImageBitmap with resizeWidth/Height to
+    // decode straight to 224×224. 3-5× faster per image for typical
+    // dealer photos. Falls back to aiFetchRaw if OffscreenCanvas or the
+    // resize option isn't supported (Safari <16, old Firefox).
+    const AI_FAST_DECODE_PROBE = (() => {
+        try {
+            return typeof createImageBitmap === 'function'
+                && typeof OffscreenCanvas === 'function';
+        } catch (_) { return false; }
+    })();
+    let aiFastDecodeFailed = false;   // sticky: one failure disables for the session
+
+    async function aiFetchRawFast(url, ex) {
+        if (!AI_FAST_DECODE_PROBE || aiFastDecodeFailed) return aiFetchRaw(url, ex);
+        const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
+        let lastErr;
+        for (let attempt = 0; attempt <= AI_FETCH_RETRIES; attempt++) {
+            if (attempt > 0) await new Promise(r => setTimeout(r, 400 + 600 * Math.pow(2, attempt - 1)));
+            try {
+                const resp = await fetch(fetchUrl, { credentials: 'omit' });
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                const blob = await resp.blob();
+                const bitmap = await createImageBitmap(blob, {
+                    resizeWidth: 224, resizeHeight: 224, resizeQuality: 'medium',
+                });
+                const canvas = new OffscreenCanvas(224, 224);
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(bitmap, 0, 0);
+                const rgba = ctx.getImageData(0, 0, 224, 224).data;
+                // Strip alpha → RGB (Transformers.js CLIP processor expects RGB)
+                const rgb = new Uint8ClampedArray(224 * 224 * 3);
+                for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
+                    rgb[j] = rgba[i]; rgb[j+1] = rgba[i+1]; rgb[j+2] = rgba[i+2];
+                }
+                try { bitmap.close && bitmap.close(); } catch (_) {}
+                return new ex.RawImage(rgb, 224, 224, 3);
+            } catch (err) {
+                lastErr = err;
+                // If the fast path blew up on the FIRST image (not a network
+                // issue), disable it for the rest of the session and fall
+                // back — safer than keeping retrying a broken path.
+                if (attempt === 0 && !/HTTP |NetworkError|Failed to fetch/.test(String(err && err.message))) {
+                    console.warn('[AI classifier] fast decode disabled:', err);
+                    aiFastDecodeFailed = true;
+                    return aiFetchRaw(url, ex);
+                }
+            }
+        }
+        throw lastErr;
+    }
+
+    // Cross-VIN batched embedding pipeline — producer/consumer form. The
+    // fetch loop runs ahead of the embed chain; embeds are enqueued but
+    // NOT awaited inline, so the fetch loop keeps ingesting new images in
+    // parallel with the model running. A small MAX_INFLIGHT_EMBEDS cap
+    // provides backpressure so decoded images don't pile up in memory
+    // when fetches outpace the model.
+    //
+    // onProgress({fetched, embedded, fetchMs, embedMs}) fires on every
+    // state change, so the UI can show live stage counters + rolling
+    // average per-stage ms for diagnostics.
+    async function aiPipelineEmbedBatched(urls, fetchConcurrency, batchSize, onItem, isCancelled, onProgress) {
         const ex = await aiLoadModel();
-        const inflight = new Map();
+        const total = urls.length;
+        if (!total) return;
+
         let fetchHead = 0;
-        const queueOne = () => {
-            while (fetchHead < urls.length && inflight.size < fetchConcurrency) {
+        const inflightFetches = new Map();
+        const queueFetches = () => {
+            while (fetchHead < total && inflightFetches.size < fetchConcurrency) {
                 const i = fetchHead++;
                 const url = urls[i];
-                if (!url) { inflight.set(i, Promise.resolve(null)); continue; }
-                if (aiEmbedCache.has(url)) { inflight.set(i, Promise.resolve('__cached__')); continue; }
-                inflight.set(i, aiFetchRaw(url, ex).catch(err => ({__err: err})));
+                if (!url) { inflightFetches.set(i, Promise.resolve(null)); continue; }
+                if (aiEmbedCache.has(url)) { inflightFetches.set(i, Promise.resolve('__cached__')); continue; }
+                const t0 = performance.now();
+                inflightFetches.set(i, aiFetchRawFast(url, ex)
+                    .then(raw => { fetchTimings.push(performance.now() - t0); return raw; })
+                    .catch(err => ({__err: err})));
             }
         };
-        queueOne();
 
-        const batch = [];     // { idx, url, raw }
-        const flushBatch = async () => {
-            if (!batch.length) return;
-            if (isCancelled && isCancelled()) { batch.length = 0; return; }
+        const fetchTimings = [];
+        const embedTimings = [];
+        let fetchedCount = 0, embeddedCount = 0;
+        const emitProgress = () => {
+            if (!onProgress) return;
+            const avgF = fetchTimings.length ? fetchTimings.reduce((a,b)=>a+b,0) / fetchTimings.length : 0;
+            const avgE = embedTimings.length ? embedTimings.reduce((a,b)=>a+b,0) / embedTimings.length : 0;
+            onProgress({ fetched: fetchedCount, embedded: embeddedCount, total, avgFetchMs: avgF, avgEmbedMs: avgE });
+        };
+
+        // Chain embeds serially (CLIP is single-threaded); bounded pending
+        // promises provide backpressure so fetches don't flood memory.
+        const MAX_INFLIGHT_EMBEDS = 2;
+        const pendingEmbeds = [];
+        const runEmbed = async (toEmbed) => {
+            if (isCancelled && isCancelled()) return;
+            const t0 = performance.now();
             try {
-                const inputs = await ex.processor(batch.map(b => b.raw));
+                const inputs = await ex.processor(toEmbed.map(b => b.raw));
                 const out = await ex.model(inputs);
                 const dims = out.image_embeds.dims || [];
-                const D = dims[dims.length - 1] || (out.image_embeds.data.length / batch.length) | 0;
+                const D = dims[dims.length - 1] || (out.image_embeds.data.length / toEmbed.length) | 0;
                 const data = out.image_embeds.data;
-                for (let k = 0; k < batch.length; k++) {
+                for (let k = 0; k < toEmbed.length; k++) {
                     const emb = aiNormalizeEmbed(data.subarray(k * D, (k + 1) * D));
-                    // Cache under the v2 shape ({full}) so a later v1 run on
-                    // the same URL still finds a usable entry if present.
-                    aiEmbedCache.set(batch[k].url, { full: emb, center: emb, top: emb });
-                    onItem({ idx: batch[k].idx, url: batch[k].url, emb, err: null });
+                    aiEmbedCache.set(toEmbed[k].url, { full: emb, center: emb, top: emb });
+                    onItem({ idx: toEmbed[k].idx, url: toEmbed[k].url, emb, err: null });
+                    embeddedCount++;
                 }
+                embedTimings.push((performance.now() - t0) / toEmbed.length);
             } catch (e) {
-                for (const b of batch) onItem({ idx: b.idx, url: b.url, emb: null, err: e });
+                for (const b of toEmbed) { onItem({ idx: b.idx, url: b.url, emb: null, err: e }); embeddedCount++; }
             }
-            batch.length = 0;
+            emitProgress();
+        };
+        const enqueueBatch = async (toEmbed) => {
+            const p = runEmbed(toEmbed);
+            pendingEmbeds.push(p);
+            if (pendingEmbeds.length >= MAX_INFLIGHT_EMBEDS) {
+                await pendingEmbeds.shift();   // backpressure: wait for oldest to drain
+            }
         };
 
-        for (let i = 0; i < urls.length; i++) {
+        queueFetches();
+        const batch = [];
+        for (let i = 0; i < total; i++) {
             if (isCancelled && isCancelled()) return;
-            const slot = inflight.get(i);
-            inflight.delete(i);
-            queueOne();
+            const slot = inflightFetches.get(i);
+            inflightFetches.delete(i);
+            queueFetches();     // backfill BEFORE awaiting so fetches keep flowing
             const url = urls[i];
             let raw = null, err = null;
             try {
@@ -5372,20 +5463,30 @@
                     const cached = aiEmbedCache.get(url);
                     const embOnly = cached && cached.full ? cached.full : cached;
                     onItem({ idx: i, url, emb: embOnly, err: null });
+                    fetchedCount++; embeddedCount++; emitProgress();
                     continue;
                 } else if (r && !r.__err) {
-                    raw = r;
+                    raw = r; fetchedCount++;
                 } else {
                     err = (r && r.__err) || new Error('fetch returned no image');
+                    fetchedCount++;
                 }
-            } catch (e) { err = e; }
+            } catch (e) { err = e; fetchedCount++; }
+            emitProgress();
 
-            if (err) { onItem({ idx: i, url, emb: null, err }); continue; }
+            if (err) { onItem({ idx: i, url, emb: null, err }); embeddedCount++; emitProgress(); continue; }
 
             batch.push({ idx: i, url, raw });
-            if (batch.length >= batchSize) await flushBatch();
+            if (batch.length >= batchSize) {
+                const toEmbed = batch.splice(0);
+                await enqueueBatch(toEmbed);
+            }
         }
-        await flushBatch();
+        if (batch.length) {
+            const toEmbed = batch.splice(0);
+            await enqueueBatch(toEmbed);
+        }
+        await Promise.all(pendingEmbeds);
     }
 
     // v2 scorer: text prior + optional user centroid, softmax, confidence
@@ -5886,6 +5987,10 @@
         if (pill) pill.classList.remove('hidden');
         const fab = document.getElementById('ai-fab');
         if (fab) fab.classList.remove('visible');
+        // Reset the timing/device line each new run so stale numbers from a
+        // prior run don't flash before the first progress event arrives.
+        const t = document.getElementById('ai-progress-timing'); if (t) t.textContent = '';
+        const d = document.getElementById('ai-progress-device'); if (d) d.textContent = '';
         _aiLockGallery(true);
     }
     function aiHideProgressPill() {
@@ -5898,6 +6003,26 @@
     // Brief visual nudge when the reviewer tries to mark during a run — flashes
     // the pill's lock hint from amber back to slate so the "paused" line is
     // obvious without a disruptive toast or alert.
+    // Diagnostic — shows "WebGPU fp16" or "CPU WASM int8" in the pill so the
+    // reviewer can see which backend is running (model-load fallback is silent
+    // in the console otherwise, which hides a slow-WASM scenario).
+    function aiSetProgressDevice(ex) {
+        const el = document.getElementById('ai-progress-device');
+        if (!el || !ex) return;
+        const dev = (ex.device || '').toUpperCase();
+        const dt  = ex.dtype ? ' ' + ex.dtype : '';
+        el.textContent = dev + dt;
+    }
+    // Live rolling average per stage, so a slow pipeline shows WHERE the time
+    // goes (fetch vs embed) instead of just a growing count.
+    function aiSetProgressTiming({ fetched, embedded, total, avgFetchMs, avgEmbedMs }) {
+        const el = document.getElementById('ai-progress-timing');
+        if (!el) return;
+        const f = Math.round(avgFetchMs || 0);
+        const e = Math.round(avgEmbedMs || 0);
+        el.textContent = 'fetch ~' + f + 'ms · embed ~' + e + 'ms';
+    }
+
     function aiFlashPillLock() {
         const hint = document.getElementById('ai-progress-lock-hint');
         if (!hint) return;
@@ -6212,7 +6337,8 @@
             AI_ALL_CLASSES.forEach(cls => (sampleUrls[cls] || []).forEach(u => sampleFlat.push({ cls, url: u })));
             const vecsByClass = {};
             AI_ALL_CLASSES.forEach(c => vecsByClass[c] = []);
-            progMsg.textContent = 'Embedding ' + sampleFlat.length + ' sample images (v2)…';
+            progMsg.textContent = 'Embedding ' + sampleFlat.length + ' sample images (v2, batch ' + BATCH + ')…';
+            aiSetProgressDevice(ex);
             progCount.textContent = '0/' + sampleFlat.length;
             const sampleStartT = Date.now();
             let sampleDone = 0;
@@ -6236,7 +6362,8 @@
                         progCount.textContent = sampleDone + '/' + sampleFlat.length;
                     }
                 },
-                () => myToken !== aiRunToken
+                () => myToken !== aiRunToken,
+                aiSetProgressTiming
             );
             if (myToken !== aiRunToken) return;
             stats.sampleEmbedMs = Date.now() - sampleStartT;
@@ -6268,7 +6395,8 @@
 
             const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
             progCount.textContent = '0/' + pendingIdxs.length;
-            progMsg.textContent = 'Classifying ' + pendingIdxs.length + ' VINs on ' + ex.device.toUpperCase() + ' (batch ' + BATCH + ', v2)…';
+            progMsg.textContent = 'Classifying ' + pendingIdxs.length + ' VINs (v2, batch ' + BATCH + ')…';
+            aiSetProgressDevice(ex);
             const pendingStartT = Date.now();
             let done = 0;
             await aiPipelineEmbedBatched(
@@ -6306,7 +6434,8 @@
                         progCount.textContent = done + '/' + pendingIdxs.length;
                     }
                 },
-                () => myToken !== aiRunToken
+                () => myToken !== aiRunToken,
+                aiSetProgressTiming
             );
             if (myToken !== aiRunToken) return;
             stats.pendingEmbedMs = Date.now() - pendingStartT;
