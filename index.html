@@ -200,6 +200,18 @@
                     <span id="csv-info-text"></span>
                     <button onclick="clearCsvFile()" class="text-green-600 hover:text-red-500 font-bold ml-2 transition">✕</button>
                 </div>
+                <!-- Resume-vs-fresh toggle. localStorage persists marks per
+                     teamId, which is derived from the CSV content, so a
+                     re-upload of the SAME CSV naturally restores the user's
+                     previous marks. That is the resume feature. When the
+                     reviewer explicitly wants a blank slate (QA testing,
+                     starting over), checking this clears marks + samples +
+                     AI suggestions for every team in the CSV before the
+                     dashboard is built. -->
+                <label id="csv-fresh-wrap" class="hidden items-start gap-2 text-[11.5px] text-slate-600 mt-1 cursor-pointer select-none">
+                    <input id="csv-fresh-start" type="checkbox" class="mt-0.5 h-3.5 w-3.5 accent-indigo-600">
+                    <span>Start fresh — clear previously marked VINs / samples for this CSV before loading.</span>
+                </label>
                 <button id="load-csv-btn" class="w-full spyne-blue text-white font-semibold py-3 rounded-lg hover:bg-blue-700 transition flex items-center justify-center space-x-2 disabled:opacity-70 opacity-50 cursor-not-allowed" disabled>
                     <span id="csv-btn-text">Select a CSV to continue →</span>
                     <div id="csv-btn-loader" class="loading-spinner hidden"></div>
@@ -2023,11 +2035,51 @@
         document.getElementById('csv-file-label').innerHTML =
             'Drop CSV here or <span class="text-blue-600 font-semibold">click to browse</span>';
         document.getElementById('csv-info-bar').classList.add('hidden');
+        const freshWrap = document.getElementById('csv-fresh-wrap');
+        if (freshWrap) { freshWrap.classList.add('hidden'); freshWrap.classList.remove('flex'); }
+        const freshBox = document.getElementById('csv-fresh-start');
+        if (freshBox) freshBox.checked = false;
         const btn = document.getElementById('load-csv-btn');
         btn.disabled = true;
         btn.classList.add('opacity-50', 'cursor-not-allowed');
         document.getElementById('csv-btn-text').textContent = 'Select a CSV to continue \u2192';
         document.getElementById('csv-file-input').value = '';
+    }
+
+    // Called from the CSV load handler when the "Start fresh" checkbox is on.
+    // Deletes all per-team state (reviews, samples, comments, AI suggestions)
+    // for every team present in the just-parsed CSV. localStorage is written
+    // once at the end so one restore is enough to roll back.
+    function clearCsvFreshState(csvData) {
+        if (!csvData || !csvData.rows) return 0;
+        // teamId lives at col 1 in the synthetic rows built by processCsvFile
+        const teamIds = new Set();
+        csvData.rows.forEach(r => { if (r && r[1]) teamIds.add(String(r[1])); });
+        if (!teamIds.size) return 0;
+        let cleared = 0;
+        try {
+            teamIds.forEach(tid => {
+                if (img1Reviews && img1Reviews[tid]) {
+                    cleared += Object.keys(img1Reviews[tid]).length;
+                    delete img1Reviews[tid];
+                }
+                if (img1Comments && img1Comments[tid]) delete img1Comments[tid];
+                if (aiSuggestions && aiSuggestions[tid]) delete aiSuggestions[tid];
+                if (aiAbRuns && aiAbRuns[tid]) delete aiAbRuns[tid];
+                aiAutoOpenedTeams.delete(tid);
+            });
+            // img1Samples is keyed by the per-vin review key (teamId:vin:rooftop),
+            // so wipe any entry whose teamId prefix matches a loaded team.
+            if (img1Samples) {
+                Object.keys(img1Samples).forEach(k => {
+                    const tidPart = k.split(':')[0];
+                    if (teamIds.has(tidPart)) delete img1Samples[k];
+                });
+            }
+            persist1ImgReviews();
+            persist1ImgSamples();
+        } catch (e) { console.warn('Fresh-start clear failed:', e); }
+        return cleared;
     }
 
     function setParseProgress(pct, label) { /* progress bar removed */ }
@@ -2208,6 +2260,24 @@
                 document.getElementById('csv-info-text').textContent =
                     '\u2713  ' + syntheticRows.length + ' VINs loaded from ' + file.name + teamInfo;
                 document.getElementById('csv-info-bar').classList.remove('hidden');
+                // Count existing marks for teams in this CSV; only show the
+                // "start fresh" checkbox when there is something to clear.
+                const teamIdsInCsv = new Set();
+                syntheticRows.forEach(r => { if (r && r[1]) teamIdsInCsv.add(String(r[1])); });
+                let priorMarks = 0;
+                teamIdsInCsv.forEach(tid => { if (img1Reviews && img1Reviews[tid]) priorMarks += Object.keys(img1Reviews[tid]).length; });
+                const freshWrap = document.getElementById('csv-fresh-wrap');
+                if (freshWrap) {
+                    if (priorMarks > 0) {
+                        freshWrap.classList.remove('hidden');
+                        freshWrap.classList.add('flex');
+                        const txt = freshWrap.querySelector('span');
+                        if (txt) txt.textContent = 'Start fresh \u2014 clear ' + priorMarks + ' previously marked VIN' + (priorMarks === 1 ? '' : 's') + ' for this CSV before loading.';
+                    } else {
+                        freshWrap.classList.add('hidden');
+                        freshWrap.classList.remove('flex');
+                    }
+                }
                 const btn = document.getElementById('load-csv-btn');
                 btn.disabled = false;
                 btn.classList.remove('opacity-50', 'cursor-not-allowed');
@@ -2224,6 +2294,13 @@
         if (loadCsvBtn) {
             loadCsvBtn.addEventListener('click', async () => {
                 if (!csvFileData) { showError('Please select a CSV file first.'); return; }
+                // Honor the "start fresh" checkbox before anything else so the
+                // dashboard build runs against a clean slate for these teams.
+                const freshBox = document.getElementById('csv-fresh-start');
+                if (freshBox && freshBox.checked) {
+                    const cleared = clearCsvFreshState(csvFileData);
+                    if (cleared > 0) console.log('[CSV load] fresh start, cleared', cleared, 'prior marks');
+                }
                 const btn   = document.getElementById('load-csv-btn');
                 const bText = document.getElementById('csv-btn-text');
                 const bLoad = document.getElementById('csv-btn-loader');
@@ -5317,27 +5394,18 @@
         return centroids;
     }
 
-    // Fast image fetch + resize path. The default aiFetchRaw calls
-    // ex.RawImage.read(url) which fetches, then decodes the image at its
-    // natural (often 2048×1536) size before Transformers.js's processor
-    // then resizes it to CLIP's 224×224. For a 128-VIN run this spends
-    // ~70% of per-image wall-clock on full-res decode we throw away.
-    //
-    // aiFetchRawFast fetches the blob directly and uses the browser's
-    // hardware-accelerated createImageBitmap with resizeWidth/Height to
-    // decode straight to 224×224. 3-5× faster per image for typical
-    // dealer photos. Falls back to aiFetchRaw if OffscreenCanvas or the
-    // resize option isn't supported (Safari <16, old Firefox).
-    const AI_FAST_DECODE_PROBE = (() => {
-        try {
-            return typeof createImageBitmap === 'function'
-                && typeof OffscreenCanvas === 'function';
-        } catch (_) { return false; }
-    })();
-    let aiFastDecodeFailed = false;   // sticky: one failure disables for the session
+    // Fast decode path (createImageBitmap resize + manual RGB extract) was
+    // shipped but produced a catastrophic failure in field testing (every
+    // one of 867 images classified as Photo NA at 100%, meaning every fetch
+    // or every decode errored and hit the autoBrokenImg path). Disabled
+    // behind a flag until the exact failure mode is isolated with devtools
+    // open. Keep the function in place so we can flip the flag back on
+    // without a code revert. Current behavior: aiFetchRaw (the stable
+    // Transformers.js path) is used for every fetch.
+    const AI_USE_FAST_DECODE = false;
 
     async function aiFetchRawFast(url, ex) {
-        if (!AI_FAST_DECODE_PROBE || aiFastDecodeFailed) return aiFetchRaw(url, ex);
+        if (!AI_USE_FAST_DECODE) return aiFetchRaw(url, ex);
         const fetchUrl = AI_IMAGE_PROXY ? AI_IMAGE_PROXY + encodeURIComponent(url) : url;
         let lastErr;
         for (let attempt = 0; attempt <= AI_FETCH_RETRIES; attempt++) {
@@ -5353,7 +5421,6 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(bitmap, 0, 0);
                 const rgba = ctx.getImageData(0, 0, 224, 224).data;
-                // Strip alpha → RGB (Transformers.js CLIP processor expects RGB)
                 const rgb = new Uint8ClampedArray(224 * 224 * 3);
                 for (let i = 0, j = 0; i < rgba.length; i += 4, j += 3) {
                     rgb[j] = rgba[i]; rgb[j+1] = rgba[i+1]; rgb[j+2] = rgba[i+2];
@@ -5362,14 +5429,8 @@
                 return new ex.RawImage(rgb, 224, 224, 3);
             } catch (err) {
                 lastErr = err;
-                // If the fast path blew up on the FIRST image (not a network
-                // issue), disable it for the rest of the session and fall
-                // back — safer than keeping retrying a broken path.
-                if (attempt === 0 && !/HTTP |NetworkError|Failed to fetch/.test(String(err && err.message))) {
-                    console.warn('[AI classifier] fast decode disabled:', err);
-                    aiFastDecodeFailed = true;
-                    return aiFetchRaw(url, ex);
-                }
+                console.warn('[AI classifier] fast decode failed, falling back:', err);
+                return aiFetchRaw(url, ex);
             }
         }
         throw lastErr;
@@ -6399,14 +6460,41 @@
             aiSetProgressDevice(ex);
             const pendingStartT = Date.now();
             let done = 0;
+            // Catastrophic failure guard: if the first N fetches all fail,
+            // the whole run would silently classify every VIN as Photo NA
+            // at 100% (the autoBrokenImg path). Field incident 2026-10-27:
+            // 867/867 VINs mis-tagged this way because a decode bug errored
+            // every image. Abort early so the reviewer sees a clear network
+            // error instead of accepting bogus suggestions.
+            const CATASTROPHIC_SAMPLE_N = Math.min(10, pendingIdxs.length);
+            let catFailCount = 0, catSeen = 0;
+            let catastrophic = false;
             await aiPipelineEmbedBatched(
                 pendingUrls,
                 AI_FETCH_CONCURRENCY,
                 BATCH,
                 ({ idx: localIdx, url, emb, err }) => {
                     if (myToken !== aiRunToken) return;
+                    if (catastrophic) return;    // we've bailed
                     const vinIdx = pendingIdxs[localIdx];
                     const v = currentImg1VINs[vinIdx];
+                    if (catSeen < CATASTROPHIC_SAMPLE_N) {
+                        catSeen++;
+                        if (err) catFailCount++;
+                        if (catSeen === CATASTROPHIC_SAMPLE_N && catFailCount >= Math.ceil(CATASTROPHIC_SAMPLE_N * 0.6)) {
+                            // 6+ of the first 10 failed → image pipeline is broken.
+                            catastrophic = true;
+                            aiRunToken++;              // cancels the pipeline on next event
+                            console.error('[AI classifier v2] catastrophic fetch failure:', catFailCount + '/' + catSeen);
+                            progMsg.textContent = 'Aborted: ' + catFailCount + '/' + catSeen + ' first fetches failed. Network/proxy issue — nothing marked.';
+                            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 5000);
+                            // Clear anything we already wrote so no bogus
+                            // Photo NA tags land in the suggestion map.
+                            aiSuggestions[tid] = {};
+                            stats.catastrophic = true;
+                            return;
+                        }
+                    }
                     if (err) {
                         aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: vinIdx, autoBrokenImg: true };
                         stats.pendingAutoPhotoNA++;
@@ -6437,6 +6525,14 @@
                 () => myToken !== aiRunToken,
                 aiSetProgressTiming
             );
+            // Catastrophic path bumped aiRunToken itself and already cleared
+            // aiSuggestions; show the error and exit without opening a report.
+            if (catastrophic || stats.catastrophic) {
+                aiAbRuns[tid] = aiAbRuns[tid] || {};
+                aiAbRuns[tid].v2 = { suggestions: {}, stats, elapsedMs: Date.now() - runStartT };
+                try { render1ImgGallery(); } catch (_) {}
+                return;
+            }
             if (myToken !== aiRunToken) return;
             stats.pendingEmbedMs = Date.now() - pendingStartT;
             stats.elapsedMs = Date.now() - runStartT;
