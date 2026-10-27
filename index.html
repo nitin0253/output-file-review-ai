@@ -6233,19 +6233,47 @@
             progMsg.textContent = 'Classifying pending VINs on ' + (aiExtractor?.device === 'webgpu' ? 'WebGPU' : 'CPU') + ' (' + AI_FETCH_CONCURRENCY + ' parallel fetches)…';
             const pendingUrls = pendingIdxs.map(i => (currentImg1VINs[i].urls && currentImg1VINs[i].urls[0]) || '');
             let done = 0;
+            // Catastrophic failure guard (same as v2) — if 6+ of the first 10
+            // pending fetches error, the proxy is down for these hosts and
+            // writing N auto-Photo-NA tags would be silently wrong. Abort,
+            // wipe anything we already wrote, show the exact error.
+            const CATASTROPHIC_SAMPLE_N = Math.min(10, pendingIdxs.length);
+            let catSeen = 0, catFail = 0, catastrophic = false, firstErrMsg = null;
             await aiPipelineEmbed(
                 pendingUrls,
                 AI_FETCH_CONCURRENCY,
                 ({ idx: localIdx, url, emb, err }) => {
                     if (myToken !== aiRunToken) return;
+                    if (catastrophic) return;
                     const vinIdx = pendingIdxs[localIdx];
                     const v = currentImg1VINs[vinIdx];
+                    if (catSeen < CATASTROPHIC_SAMPLE_N) {
+                        catSeen++;
+                        if (err) { catFail++; if (!firstErrMsg) firstErrMsg = String((err && err.message) || err).slice(0, 160); }
+                        if (catSeen === CATASTROPHIC_SAMPLE_N && catFail >= Math.ceil(CATASTROPHIC_SAMPLE_N * 0.6)) {
+                            catastrophic = true;
+                            aiRunToken++;
+                            console.error('[AI classifier v1] catastrophic fetch failure:', catFail + '/' + catSeen, 'first error:', firstErrMsg);
+                            progMsg.textContent = 'Aborted: ' + catFail + '/' + catSeen + ' fetches failed. ' + (firstErrMsg || 'Image proxy or host blocked.');
+                            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 8000);
+                            aiSuggestions[tid] = {};
+                            stats.catastrophic = true;
+                            stats.catastrophicFirstError = firstErrMsg;
+                            return;
+                        }
+                    }
                     if (err) {
-                        // Fetch failed after retries → treat as "no displayable image"
-                        aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: vinIdx, autoBrokenImg: true };
-                        stats.pendingAutoPhotoNA++;
+                        // Fetch failed after retries. Do NOT auto-tag Photo NA
+                        // (that's dangerous when the host is proxy-blocked —
+                        // the image may well exist, we just can't reach it).
+                        // Leave the VIN unmarked so it stays pending for
+                        // manual review and is counted as "fetch failed".
+                        stats.pendingAutoPhotoNA = (stats.pendingAutoPhotoNA || 0);
                         stats.pendingFail++;
                         recordErr('pending', url, err);
+                        if (!stats.firstFailHost && url) {
+                            try { stats.firstFailHost = new URL(url).host; } catch (_) {}
+                        }
                     } else if (emb) {
                         stats.pendingOk++;
                         // Score each class by full-image similarity (the baseline signal)
@@ -6323,6 +6351,14 @@
                 },
                 () => myToken !== aiRunToken
             );
+            if (catastrophic || stats.catastrophic) {
+                stats.version   = 'v1';
+                stats.elapsedMs = Date.now() - runStartT;
+                aiAbRuns[tid] = aiAbRuns[tid] || {};
+                aiAbRuns[tid].v1 = { suggestions: {}, stats, elapsedMs: stats.elapsedMs };
+                try { render1ImgGallery(); } catch (_) {}
+                return;
+            }
             if (myToken !== aiRunToken) return;
 
             stats.version   = 'v1';
@@ -6473,37 +6509,41 @@
             const CATASTROPHIC_SAMPLE_N = Math.min(10, pendingIdxs.length);
             let catFailCount = 0, catSeen = 0;
             let catastrophic = false;
+            let firstErrMsg = null;
             await aiPipelineEmbedBatched(
                 pendingUrls,
                 AI_FETCH_CONCURRENCY,
                 BATCH,
                 ({ idx: localIdx, url, emb, err }) => {
                     if (myToken !== aiRunToken) return;
-                    if (catastrophic) return;    // we've bailed
+                    if (catastrophic) return;
                     const vinIdx = pendingIdxs[localIdx];
                     const v = currentImg1VINs[vinIdx];
                     if (catSeen < CATASTROPHIC_SAMPLE_N) {
                         catSeen++;
-                        if (err) catFailCount++;
+                        if (err) { catFailCount++; if (!firstErrMsg) firstErrMsg = String((err && err.message) || err).slice(0, 160); }
                         if (catSeen === CATASTROPHIC_SAMPLE_N && catFailCount >= Math.ceil(CATASTROPHIC_SAMPLE_N * 0.6)) {
-                            // 6+ of the first 10 failed → image pipeline is broken.
                             catastrophic = true;
-                            aiRunToken++;              // cancels the pipeline on next event
-                            console.error('[AI classifier v2] catastrophic fetch failure:', catFailCount + '/' + catSeen);
-                            progMsg.textContent = 'Aborted: ' + catFailCount + '/' + catSeen + ' first fetches failed. Network/proxy issue — nothing marked.';
-                            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 5000);
-                            // Clear anything we already wrote so no bogus
-                            // Photo NA tags land in the suggestion map.
+                            aiRunToken++;
+                            console.error('[AI classifier v2] catastrophic fetch failure:', catFailCount + '/' + catSeen, 'first error:', firstErrMsg);
+                            progMsg.textContent = 'Aborted: ' + catFailCount + '/' + catSeen + ' fetches failed. ' + (firstErrMsg || 'Image proxy or host blocked.');
+                            setTimeout(() => { aiRunInFlight = false; aiHideProgressPill(); }, 8000);
                             aiSuggestions[tid] = {};
                             stats.catastrophic = true;
+                            stats.catastrophicFirstError = firstErrMsg;
                             return;
                         }
                     }
                     if (err) {
-                        aiSuggestions[tid][aiVinKey(v)] = { cls: 'photo_na', conf: 1.0, margin: 1.0, idx: vinIdx, autoBrokenImg: true };
-                        stats.pendingAutoPhotoNA++;
+                        // Do NOT auto-tag Photo NA on fetch error (dangerous
+                        // when the host is proxy-blocked — the image may well
+                        // exist, we just can't reach it). Leave VIN unmarked
+                        // for manual review.
                         stats.pendingFail++;
                         recordErr('pending', url, err);
+                        if (!stats.firstFailHost && url) {
+                            try { stats.firstFailHost = new URL(url).host; } catch (_) {}
+                        }
                     } else if (emb) {
                         stats.pendingOk++;
                         const result = aiScoreV2(emb, textCentroids, userCentroids);
@@ -6631,6 +6671,15 @@
             const excludedNote = excludedKeys.length
                 ? ' <span class="text-amber-600 font-semibold">· ' + excludedKeys.length + ' class' + (excludedKeys.length === 1 ? '' : 'es') + ' skipped (not enough samples)</span>'
                 : '';
+            // Image-fetch failures: when the proxy or host is blocking (e.g.
+            // DealerOn Varnish 405 on www.rochestertoyota.com), these VINs
+            // are left UNMARKED instead of auto-tagged Photo NA. Surface the
+            // count + host so the reviewer knows WHY they're unmarked.
+            const failN = (aiLastRunStats && aiLastRunStats.pendingFail) || 0;
+            const failHost = aiLastRunStats && aiLastRunStats.firstFailHost;
+            const fetchFailNote = failN > 0
+                ? ' <span class="text-rose-600 font-semibold">· ' + failN + ' VIN' + (failN === 1 ? '' : 's') + ' unmarked (image fetch blocked' + (failHost ? ' at ' + failHost : '') + ')</span>'
+                : '';
             // Version + wall-clock badge: tells the reviewer which classifier
             // produced this report and how long it took, so A/B deltas are
             // visible even without opening the comparison dialog.
@@ -6640,7 +6689,7 @@
             const verBadge = ver
                 ? ' <span style="display:inline-block;padding:1px 6px;border-radius:4px;background:' + bg + ';color:#fff;font-weight:700;font-size:10.5px;letter-spacing:.06em;margin-left:4px">' + ver.toUpperCase() + (ms ? ' · ' + aiFormatMs(ms) : '') + '</span>'
                 : '';
-            subtitleEl.innerHTML = parts.join(' · ') + excludedNote + verBadge + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
+            subtitleEl.innerHTML = parts.join(' · ') + excludedNote + fetchFailNote + verBadge + '. Accept all per class, click a tile to reject it (moves to Uncategorized), or dismiss and keep working manually.';
         }
         const colorFor = (c) => c === 'uncategorized' ? '#64748b' : stateColor(c);
         const labelFor = (c) => c === 'uncategorized' ? 'Uncategorized' : stateLabel(c);

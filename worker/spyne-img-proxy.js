@@ -24,6 +24,15 @@ const CORS_HEADERS = {
   'Access-Control-Max-Age': '86400',
 };
 
+// Hosts known to need stripped-down headers (DealerOn / Varnish rule 54113
+// 405s requests whose header pattern it recognizes as proxied). Pattern-match
+// is intentional: www.<something>.com paths going through a Varnish cache
+// typically fare better when we DON'T send Sec-Fetch-* or Accept-Language.
+function needsStrippedHeaders(host) {
+  return /\.(com|net|org)$/i.test(host) &&
+         !/pictures\.dealer\.com|images\.dealer\.com|cdn\.|cloudfront\.net/i.test(host);
+}
+
 export default {
   async fetch(request) {
     if (request.method === 'OPTIONS') {
@@ -53,21 +62,31 @@ export default {
     // rejects requests whose Referer is empty or on an unknown domain).
     const sameOriginReferer = `${upstream.protocol}//${upstream.host}/`;
 
+    // Build headers conservatively — some Varnish rules (DealerOn error 54113
+    // seen 2026-10-27) 405 any request carrying Sec-Fetch-* headers because
+    // those identify the request as a non-document subresource, which doesn't
+    // match the pattern their rule allows. For sensitive hosts we strip them.
+    const stripped = needsStrippedHeaders(upstream.host);
+    const headers = {
+      'User-Agent': BROWSER_UA,
+      'Accept': stripped ? '*/*' : 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+      'Referer': sameOriginReferer,
+    };
+    if (!stripped) {
+      headers['Accept-Language'] = 'en-US,en;q=0.9';
+      headers['Sec-Fetch-Dest'] = 'image';
+      headers['Sec-Fetch-Mode'] = 'no-cors';
+      headers['Sec-Fetch-Site'] = 'same-origin';
+    }
+
     const upstreamReq = new Request(upstream.toString(), {
       method: request.method,
-      headers: {
-        'User-Agent': BROWSER_UA,
-        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': sameOriginReferer,
-        'Sec-Fetch-Dest': 'image',
-        'Sec-Fetch-Mode': 'no-cors',
-        'Sec-Fetch-Site': 'same-origin',
-      },
+      headers,
       redirect: 'follow',
       cf: {
-        // Short edge cache so repeated embeds within a session don't re-hit upstream.
-        cacheTtl: 300,
+        // Per-status cache: hold successes 5 min, DON'T hold errors (a 405
+        // or 502 would otherwise pin for the whole TTL and mask recovery).
+        cacheTtlByStatus: { '200-299': 300, '300-399': 60, '400-599': 0 },
         cacheEverything: true,
       },
     });
@@ -78,19 +97,37 @@ export default {
     } catch (err) {
       return new Response('Upstream fetch failed: ' + (err && err.message || err), {
         status: 502,
-        headers: CORS_HEADERS,
+        headers: { ...CORS_HEADERS, 'Cache-Control': 'no-store' },
       });
     }
 
-    const headers = new Headers(resp.headers);
-    for (const [k, v] of Object.entries(CORS_HEADERS)) headers.set(k, v);
-    // Strip upstream caching directives that could pin a stale 403 at the browser.
-    headers.delete('set-cookie');
+    // If the stripped-header path returned 405/403 and we DIDN'T strip, try
+    // again with the stripped set — covers the inverse case where our normal
+    // headers pass but a sensitive host rejects.
+    if (!stripped && (resp.status === 405 || resp.status === 403)) {
+      const retryHeaders = {
+        'User-Agent': BROWSER_UA,
+        'Accept': '*/*',
+        'Referer': sameOriginReferer,
+      };
+      try {
+        const retryResp = await fetch(new Request(upstream.toString(), {
+          method: request.method, headers: retryHeaders, redirect: 'follow',
+          cf: { cacheTtlByStatus: { '200-299': 300, '400-599': 0 }, cacheEverything: true },
+        }));
+        if (retryResp.status < 400) resp = retryResp;
+      } catch (_) {}
+    }
+
+    const outHeaders = new Headers(resp.headers);
+    for (const [k, v] of Object.entries(CORS_HEADERS)) outHeaders.set(k, v);
+    outHeaders.delete('set-cookie');
+    if (resp.status >= 400) outHeaders.set('Cache-Control', 'no-store');
 
     return new Response(resp.body, {
       status: resp.status,
       statusText: resp.statusText,
-      headers,
+      headers: outHeaders,
     });
   },
 };
