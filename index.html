@@ -2260,22 +2260,26 @@
                 document.getElementById('csv-info-text').textContent =
                     '\u2713  ' + syntheticRows.length + ' VINs loaded from ' + file.name + teamInfo;
                 document.getElementById('csv-info-bar').classList.remove('hidden');
-                // Count existing marks for teams in this CSV; only show the
-                // "start fresh" checkbox when there is something to clear.
+                // Count existing marks for teams in this CSV and always show
+                // the "start fresh" checkbox when a CSV is selected \u2014 if
+                // there are no prior marks the label just says so.
                 const teamIdsInCsv = new Set();
                 syntheticRows.forEach(r => { if (r && r[1]) teamIdsInCsv.add(String(r[1])); });
                 let priorMarks = 0;
                 teamIdsInCsv.forEach(tid => { if (img1Reviews && img1Reviews[tid]) priorMarks += Object.keys(img1Reviews[tid]).length; });
                 const freshWrap = document.getElementById('csv-fresh-wrap');
                 if (freshWrap) {
-                    if (priorMarks > 0) {
-                        freshWrap.classList.remove('hidden');
-                        freshWrap.classList.add('flex');
-                        const txt = freshWrap.querySelector('span');
-                        if (txt) txt.textContent = 'Start fresh \u2014 clear ' + priorMarks + ' previously marked VIN' + (priorMarks === 1 ? '' : 's') + ' for this CSV before loading.';
-                    } else {
-                        freshWrap.classList.add('hidden');
-                        freshWrap.classList.remove('flex');
+                    freshWrap.classList.remove('hidden');
+                    freshWrap.classList.add('flex');
+                    const txt = freshWrap.querySelector('span');
+                    if (txt) {
+                        if (priorMarks > 0) {
+                            txt.innerHTML = '<b>Start fresh</b> \u2014 clear <b>' + priorMarks + '</b> previously marked VIN' + (priorMarks === 1 ? '' : 's') + ' for this CSV before loading.';
+                            freshWrap.style.color = '#b45309';     // amber tone so the count is noticed
+                        } else {
+                            txt.innerHTML = '<b>Start fresh</b> \u2014 no previous marks for this CSV (checkbox has no effect).';
+                            freshWrap.style.color = '';
+                        }
                     }
                 }
                 const btn = document.getElementById('load-csv-btn');
